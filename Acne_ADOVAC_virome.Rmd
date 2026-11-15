@@ -1,0 +1,2148 @@
+---
+title: "Acne ADOVAC Virome"
+author: "Lisa Faye"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+      df_print: paged
+      number_sections: TRUE
+      keep_md: no
+      theme: default
+      highlight: kate
+      toc: true
+      toc_depth: 3 
+      toc_float:
+         smooth_scroll: true
+---
+
+R script supporting the visualizations in the manuscript entitled: "The skin virome in acne vulgaris reveals increased orthototivirus diversity and three novel members of the Orthototiviridae family"
+
+```{r include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+```
+
+```{r include=TRUE, results="hide"}
+packages <- c("ape", "decontam", "DHARMa", "dplyr", "DT", "emmeans", "ggbreak", "ggh4x", "ggplot2", "ggpubr", "ggtext", "ggtree", "glmmTMB", "lme4", "pals", "patchwork", "phyloseq", "purrr", "RColorBrewer", "readxl", "rstatix", "scales", "tidyverse", "vegan", "wesanderson")
+lapply(packages, library, character.only = TRUE)
+```
+
+```{r echo=FALSE}
+si <- sessioninfo::session_info()
+pckgs <- map2(si$packages$package[si$packages$attached == T], 
+              si$packages$loadedversion[si$packages$attached == T],
+              ~ paste0(.x, " ", .y)) %>% 
+  simplify()
+print(si$platform$version)
+print(paste0("Running under: ", si$platform$os))
+print(pckgs)
+```
+
+# Prepare Data
+
+## Retrieve metadata
+```{r}
+metadata <- read.delim("data/METADATA/ADOVAC_merged_virome_metadata.csv", sep=",", header=T)
+metadata_indiv_samples <- read.delim("data/METADATA/ADOVAC_virome_metadata.csv", sep=",", header=T)
+```
+
+## MERGED SAMPLES
+
+**DE NOVO ASSEMBLY APPROACH**
+
+### Retrieve abundance table
+
+```{r}
+abundance_table <- read.delim("data/DE_NOVO_ASSEMBLY/MERGED_SAMPLES/ABUNDANCES/abundance_table_merged.csv", sep=",", header=T, check.names = FALSE)
+
+# Create 3 lists: all names, samples only, negative controls and positive controls
+allnames <- metadata %>%
+    pull(SAMPLE_ID)
+
+samples <- metadata %>% 
+    filter(!CONDITION == "Control") %>%
+    pull(SAMPLE_ID)
+
+acne <- metadata %>% 
+    filter(CONDITION == "Acne") %>%
+    pull(SAMPLE_ID)
+
+healthy <- metadata %>% 
+    filter(CONDITION == "Healthy") %>%
+    pull(SAMPLE_ID)
+
+neg_controls <- metadata %>%
+    filter(grepl("NC", SAMPLE_ID)) %>%
+    pull(SAMPLE_ID)
+
+pos_controls <- metadata %>%
+    filter(grepl("PC", SAMPLE_ID)) %>%
+    pull(SAMPLE_ID)
+```
+
+### Calculate prevalence and total abundances ---- 
+
+```{r}
+Prevalence_abundance <- abundance_table %>%
+    mutate(
+        PrevalenceSamples = rowSums(select(., all_of(samples)) != 0),
+        PrevalenceNegControls = rowSums(select(., all_of(neg_controls)) != 0),
+        PrevalencePosControls = rowSums(select(., all_of(pos_controls)) != 0),
+        AbundanceSamples = rowSums(select(., all_of(samples))),
+        AbundanceNegControls = rowSums(select(., all_of(neg_controls))),
+        AbundancePosControls = rowSums(select(., all_of(pos_controls)))) %>%
+    select(-all_of(allnames))
+```
+
+### Generate taxonomy table
+
+#### Load Diamond output
+```{r}
+Taxonomy_Diamond <- read.csv("data/DE_NOVO_ASSEMBLY/MERGED_SAMPLES/VIRAL_CLASSIFICATION/DIAMOND/ADOVAC_merged.1000_contigs_95-85_diamond_taxonomy.csv", header = TRUE, sep = ";")
+colnames(Taxonomy_Diamond) <- c('CONTIGS', 'Diamond_Classification', 'Diamond_Phylum', 'Diamond_Class', 'Diamond_Order', 'Diamond_Family', 'Diamond_Genus', 'Diamond_Species')
+```
+
+#### Load geNomad output
+
+```{r}
+Taxonomy_Genomad <- read.delim("data/DE_NOVO_ASSEMBLY/MERGED_SAMPLES/VIRAL_CLASSIFICATION/GENOMAD/All_samples_clustered_95-85_virus_taxonomy_merged.tsv", header = TRUE)
+colnames(Taxonomy_Genomad) <- c('CONTIGS', 'Genomad_Classification', 'Genomad_Realm', 'Genomad_Kingdom', 'Genomad_Phylum', 'Genomad_Class', 'Genomad_Order', 'Genomad_Family', 'Genomad_Subfamily', 'Genomad_Genus', 'Genomad_Species')
+Taxonomy_Genomad <- subset(Taxonomy_Genomad, select = -c(Genomad_Realm, Genomad_Kingdom, Genomad_Subfamily))
+```
+
+#### Merge outputs to build taxonomy table
+
+```{r}
+taxonomy_table <- abundance_table %>%
+    select(CONTIGS) %>%
+    left_join(Taxonomy_Diamond, by = "CONTIGS") %>%
+    left_join(Taxonomy_Genomad, by = "CONTIGS")
+```
+
+#### Identify eukaryotic viruses and phages based on ICTV's host source
+
+```{r}
+ICTV_taxa <- read_excel("data/DE_NOVO_ASSEMBLY/MERGED_SAMPLES/VIRAL_CLASSIFICATION/VMR_MSL41.v1.20260320.xlsx", "VMR MSL41", col_types = "text")
+ICTV_ranks <- c("Realm","Subrealm","Kingdom","Subkingdom","Phylum","Subphylum","Class","Subclass","Order","Suborder","Family","Subfamily","Genus","Subgenus","Species")
+
+ICTV_phages_taxa <- ICTV_taxa %>%
+    filter(`Host source` %in% c("bacteria", "bacteria, vertebrates (S)", "bacteria, invertebrates (S)"))
+
+ICTV_phages_taxa_list <- ICTV_phages_taxa %>%
+    select(all_of(ICTV_ranks)) %>%
+    unlist() %>%
+    unique() %>%
+    na.omit()
+
+ICTV_eukvir_taxa <- ICTV_taxa %>%
+    filter(!`Host source` %in% c("bacteria", "bacteria, vertebrates (S)", "bacteria, invertebrates (S)", "archaea")) #I also remove the archaea as the Caudoviricetes class contains both archaeal and bacterial viruses
+
+ICTV_eukvir_taxa_list <- ICTV_eukvir_taxa %>%
+    select(all_of(ICTV_ranks)) %>%
+    unlist() %>%
+    unique() %>%
+    na.omit()
+
+taxa_ambiguous <- intersect(ICTV_phages_taxa_list, ICTV_eukvir_taxa_list)
+
+ICTV_phages_taxa_list <- setdiff(ICTV_phages_taxa_list, taxa_ambiguous)
+ICTV_eukvir_taxa_list <- setdiff(ICTV_eukvir_taxa_list, taxa_ambiguous)
+
+annotations_tools <- c("Diamond", "Genomad")
+
+for (tool in annotations_tools){
+    classification <- paste0(tool, "_Classification")
+    for (rank in ICTV_ranks){
+        tool_rank <- paste0(tool, "_", rank)
+        if (tool_rank %in% colnames(taxonomy_table)){
+            taxonomy_table[,classification] <- ifelse(is.na(taxonomy_table[,classification]) | taxonomy_table[,classification] == "" | taxonomy_table[,classification] == "Root", 
+                                                      "Unknown", taxonomy_table[,classification])
+            taxonomy_table[,classification] <- ifelse(taxonomy_table[,classification] == "Viruses" & taxonomy_table[,tool_rank] %in% ICTV_phages_taxa_list,
+                                                      "Prokaryotic viruses", taxonomy_table[,classification])
+            taxonomy_table[,classification] <- ifelse(taxonomy_table[,classification] == "Viruses" & taxonomy_table[,tool_rank] %in% ICTV_eukvir_taxa_list,
+                                                      "Eukaryotic viruses", taxonomy_table[,classification])
+        }
+    }
+    taxonomy_table[,classification] <- ifelse(taxonomy_table[,classification] == "Viruses",
+                                              "Unclassified viruses", taxonomy_table[,classification])
+}
+
+taxonomy_table$Genomad_Classification <- ifelse(taxonomy_table$Genomad_Classification == "Unclassified", "Unclassified viruses", taxonomy_table$Genomad_Classification)
+
+levels <- c("Classification", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+
+for (tool in annotations_tools){
+    for (i in 1:(length(levels)-1)){
+        tool_rank <- paste0(tool, "_", levels[i+1])
+        if (tool_rank %in% colnames(taxonomy_table)){
+            tool_rank0 <- paste0(tool, "_", levels[i])
+            taxonomy_table[,tool_rank] <- ifelse(taxonomy_table[,tool_rank] == "" | is.na(taxonomy_table[,tool_rank]),
+                                                 gsub("Unclassified Unclassified", "Unclassified", paste("Unclassified", taxonomy_table[,tool_rank0])),
+                                                 taxonomy_table[,tool_rank])
+            taxonomy_table[,tool_rank] <- ifelse(taxonomy_table[,tool_rank] == "Unclassified Unknown", "Unknown", taxonomy_table[,tool_rank])
+        }
+    }        
+}
+
+rm(i, classification, rank, tool, tool_rank, tool_rank0)
+```
+
+#### Insert final classification of contigs in taxonomy table
+
+```{r}
+taxonomy_table$Final_Tool <- "1"
+
+taxonomy_table <- taxonomy_table %>%
+    mutate(
+        Final_Tool = case_when(
+            Genomad_Classification == "Prokaryotic viruses" & Final_Tool == "1" ~ "Genomad",
+            Diamond_Classification == "Eukaryotic viruses" & Final_Tool == "1" ~ "Diamond",
+            Genomad_Classification == "Unclassified viruses" & Final_Tool == "1" ~ "Genomad",
+            Diamond_Classification %in% c("Unclassified viruses", "Prokaryotic viruses") &
+                Genomad_Classification == "Eukaryotic viruses" & Final_Tool == "1" ~ "Tool clash",
+            Diamond_Classification == "Bacteria" & Final_Tool == "1" ~ "Diamond",
+            Diamond_Classification == "Eukaryota" & Final_Tool == "1" ~ "Diamond",
+            Diamond_Classification == "Archaea" & Final_Tool == "1" ~ "Diamond",
+            Diamond_Classification == "Unknown" & Final_Tool == "1" ~ "Diamond",
+            Genomad_Classification == "Unknown" & Final_Tool == "1" ~ "Genomad",
+            TRUE ~ Final_Tool
+        )
+    )
+
+for (i in 1:(length(levels))) {
+    final_level <- paste0("Final", "_", levels[i])
+    diamond_level <- paste0("Diamond", "_", levels[i])
+    genomad_level <- paste0("Genomad", "_", levels[i])
+    taxonomy_table[,final_level] <- ifelse(taxonomy_table$Final_Tool == "Diamond", taxonomy_table[,diamond_level],
+                                           ifelse(taxonomy_table$Final_Tool == "Genomad", taxonomy_table[,genomad_level], 
+                                                         ifelse(taxonomy_table$Final_Tool == "Tool clash", "Unclassified viruses", NA)))
+}
+```
+
+### Generate Mastertable
+
+#### Load CheckV ouput
+
+```{r}
+CheckV_output <- read.delim("data/DE_NOVO_ASSEMBLY/MERGED_SAMPLES/PHAGE_ANNOTATION/CHECKV/quality_summary_R_merged.tsv", header = TRUE)
+colnames(CheckV_output) <- c('CONTIGS', 'provirus', 'proviral length', 'total_genes', 'viral_genes', 'checkv_quality', 'completeness')
+```
+
+#### Load geNomad ouput
+
+```{r}
+geNomad_output <- read.delim("data/DE_NOVO_ASSEMBLY/MERGED_SAMPLES/VIRAL_CLASSIFICATION/GENOMAD/All_samples_clustered_95-85_virus_scores_merged.tsv", header = TRUE)
+colnames(geNomad_output) <- c('CONTIGS', 'length', 'topology', 'coordinates', 'n_genes', 'genetic_code', 'virus_score', 'fdr', 'n_hallmarks', 'marker_enrichment')
+geNomad_output$CONTIGS <- gsub("\\|provirus_.*", "", geNomad_output$CONTIGS)
+  
+viromics_tools_table <- merge(CheckV_output, geNomad_output, by = "CONTIGS", all = TRUE)
+```
+
+#### Create a Mastertable merging abundance table, taxonomy table, and viromics tools 
+
+```{r}
+Mastertable <- merge(abundance_table, taxonomy_table[, grepl("CONTIGS|^Final_", colnames(taxonomy_table))], by = "CONTIGS", all = TRUE)
+Mastertable <- merge(Mastertable, viromics_tools_table, by = "CONTIGS", all = TRUE)
+Mastertable <- merge(Mastertable, Prevalence_abundance, by = "CONTIGS", all = TRUE)
+```
+
+#### Add genome length
+
+```{r}
+Mastertable$length[is.na(Mastertable$length)] <- gsub('.*_length_','',Mastertable$CONTIGS[is.na(Mastertable$length)])
+Mastertable$length <- as.numeric(gsub("_cov_.*","",Mastertable$length))
+```
+
+#### Add phage host prediction
+
+```{r}
+iphop_output <- read.delim("data/DE_NOVO_ASSEMBLY/MERGED_SAMPLES/PHAGE_ANNOTATION/HOST_PREDICTION/Host_prediction_to_genus_m90.csv", header = TRUE, sep = ",")
+
+iphop_output <- iphop_output %>%
+    mutate(row_id = row_number()) %>% 
+    separate_rows(List.of.methods, sep = " ") %>%
+    separate(List.of.methods, into = c("Method", "Score"), sep = ";") %>%
+    mutate(Score = as.numeric(Score)) %>%
+    group_by(row_id) %>%
+    mutate(pair_id = row_number()) %>%
+    pivot_wider(
+        names_from = pair_id,
+        values_from = c(Method, Score),
+        names_glue = "{.value}.{pair_id}") %>%
+    ungroup() %>%
+    select(-row_id) %>%
+    mutate(Sum.Score = rowSums(across(starts_with("Score.")), na.rm = TRUE))
+
+iphop_output <- iphop_output %>%
+    rename(CONTIGS = Virus) %>%
+    mutate(Host.genus = gsub("[dpcofg]__", "", Host.genus)) %>%
+    separate(Host.genus, c("Host_Domain","Host_Phylum", "Host_Class", "Host_Order", "Host_Family", "Host_Genus"), sep = ";") %>%
+    mutate(Host_Genus = gsub("_[A-Za-z]$", "", Host_Genus)) %>%
+    group_by(CONTIGS) %>%
+    arrange(desc(Confidence.score), desc(Sum.Score), .by_group = TRUE) %>%
+    slice(1) %>%
+    ungroup() %>%
+    select(CONTIGS, matches("^Host_"))
+
+Mastertable <- left_join(Mastertable, iphop_output, by = "CONTIGS")
+```
+
+### Remove all contigs considered as contaminants and present in NEGATIVE controls
+
+```{r}
+Mastertable_decontam <- Mastertable[!Mastertable$PrevalenceNegControls > 0,]
+```
+
+### Remove all contigs present in POSITIVE controls
+
+```{r}
+Mastertable_no_mock <- Mastertable_decontam[!(Mastertable_decontam$PrevalencePosControls > 0),]
+Mastertable_no_mock <- Mastertable_no_mock %>%
+    filter(!Final_Genus %in% c("Alphainfluenzavirus"))
+```
+
+### Remove all non-viral contigs
+
+```{r}
+Mastertable_viral <- Mastertable_no_mock %>% 
+    filter(grepl("viruses", Final_Classification)) %>%
+    select(-all_of(c(neg_controls, pos_controls)))
+```
+
+### Add orthototiviridae genera from phylogenetic analysis
+
+```{r}
+tree_orthototi <- read.tree("data/DE_NOVO_ASSEMBLY/MERGED_SAMPLES/VIRAL_CLASSIFICATION/ORTHOTOTIVIRIDAE/complete_orthototiviridae_with_outg.aln_trimmed.fasta.treefile")
+
+orthototi_references <- read.delim("data/DE_NOVO_ASSEMBLY/MERGED_SAMPLES/VIRAL_CLASSIFICATION/ORTHOTOTIVIRIDAE/ICTV_orthototiviridae_RdRps_with_outg.tsv", header = TRUE)
+
+tree_orthototi_all_contigs_with_RdRps <- read.tree("data/DE_NOVO_ASSEMBLY/MERGED_SAMPLES/VIRAL_CLASSIFICATION/ORTHOTOTIVIRIDAE/all_orthototiviridae_with_outg.aln.fasta.treefile")
+
+my_complete_orthoti <- c("DermYa Orthototivirus 1" = "NODE_A5_length_4617_cov_1992.922907_201_NIL_1",
+                         "DermYa Orthototivirus 1" = "NODE_A7_length_4035_cov_296.875442_202_NIL_2",
+                         "DermYa Orthototivirus 1" = "NODE_A3_length_3754_cov_510.757139_208_NL_2",
+                         "DermYa Orthototivirus 1" = "NODE_A2_length_4560_cov_988.028998_207_NIL_2",
+                         "DermYa Orthototivirus 1" = "NODE_A4_length_4357_cov_849.579673_202_NIL_1",
+                         "DermYa Orthototivirus 1" = "NODE_A2_length_4385_cov_213.898561_209_NIL_1",
+                         "DermYa Orthototivirus 2" = "NODE_A7_length_4529_cov_1142.607143_201_NIL_2",
+                         "DermYa Orthototivirus 2" = "NODE_A5_length_4306_cov_548.590683_202_NIL_2",
+                         "DermYa Orthototivirus 2" = "NODE_B3_length_4150_cov_18.108765_204_IL_3",
+                         "DermYa Orthototivirus 2" = "NODE_A4_length_4345_cov_666.457826_210_NIL_1",
+                         "DermYa Orthototivirus 2" = "NODE_A20_length_2839_cov_217.490224_202_IL_2",
+                         "DermYa Orthototivirus 3" = "NODE_A459_length_3790_cov_391.695933_205_NL_2")
+
+my_complete_orthoti <- data.frame(
+    Accession = my_complete_orthoti,
+    Species = names(my_complete_orthoti),
+    stringsAsFactors = FALSE)
+
+orthototi_references_new <- merge(orthototi_references, my_complete_orthoti, by = c("Accession", "Species"), all = TRUE)
+
+additional_tips <- tree_orthototi_all_contigs_with_RdRps$tip.label[
+    grepl("NODE", tree_orthototi_all_contigs_with_RdRps$tip.label) &
+        !tree_orthototi_all_contigs_with_RdRps$tip.label %in% my_complete_orthoti$Accession]
+
+dist_matrix <- cophenetic(tree_orthototi_all_contigs_with_RdRps)
+
+closest_refs <- sapply(additional_tips, function(seq) {
+    dists <- dist_matrix[seq, ]
+    dists_ref <- dists[names(dists) %in% orthototi_references_new$Accession]
+    names(which.min(dists_ref))})
+
+assigned_clades <- orthototi_references_new %>%
+    filter(Accession %in% closest_refs) %>%
+    select(Accession, Species)
+
+assigned_orthototi <- data.frame(CONTIGS = additional_tips, ClosestRef = closest_refs) %>%
+    left_join(assigned_clades, by = c("ClosestRef" = "Accession")) %>%
+    rename("Orthototi_phylo" = "Species")
+
+assigned_orthototi <- merge(assigned_orthototi, my_complete_orthoti, by.x = c("CONTIGS", "Orthototi_phylo"), by.y = c("Accession", "Species"), all = TRUE)
+
+assigned_orthototi$CONTIGS <- sub("_[0-9]+$", "", assigned_orthototi$CONTIGS)
+
+Mastertable_viral$Final_Genus[Mastertable_viral$Final_Family == "Orthototiviridae"] <- "Totivirus"
+Mastertable_viral$Final_Species[Mastertable_viral$Final_Family == "Orthototiviridae"] <- NA
+
+Mastertable_viral <- Mastertable_viral %>%
+    left_join(assigned_orthototi %>% select(CONTIGS, Orthototi_phylo), by = "CONTIGS")
+
+Mastertable_viral <- Mastertable_viral %>%
+    mutate(Final_Species = if_else(Final_Family == "Orthototiviridae", Orthototi_phylo,
+                                   Final_Species)) %>%
+    mutate(Final_Species = if_else(Final_Family == "Orthototiviridae" & is.na(Final_Species), "Unclassified Orthototiviridae",
+                                   Final_Species)) %>%
+    select(-Orthototi_phylo)
+```
+
+### Generate counts table
+
+```{r}
+Raw_reads <- read.delim("data/DE_NOVO_ASSEMBLY/MERGED_SAMPLES/COUNTS/ADOVAC_PID.number_raw_reads.txt", header = FALSE, sep = "\t", col.names = c("Samples", "Raw_reads"))
+
+Trimmed_reads <- read.delim("data/DE_NOVO_ASSEMBLY/MERGED_SAMPLES/COUNTS/ADOVAC_PID.number_trimmed_reads.txt", header = FALSE, sep = "\t", col.names = c("Samples", "Trimmed_reads"))
+
+Hostout_reads <- read.delim("data/DE_NOVO_ASSEMBLY/MERGED_SAMPLES/COUNTS/ADOVAC_PID.number_hostout_reads.txt", header = FALSE, sep = "\t", col.names = c("Samples", "Hostout_reads"))
+
+Mapped_reads <- data.frame(Samples = colnames(abundance_table[,-1]), Mapped_reads = as.vector(colSums(abundance_table[,-1], na.rm = TRUE)))
+
+Contigs <- data.frame(Samples = colnames(abundance_table[,-1]), Contigs = as.vector(colSums(abundance_table != 0, na.rm = TRUE)[-1]))
+
+Mapped_viral_reads <- Mastertable_viral %>% 
+    select(all_of(samples)) %>%
+    summarise(across(everything(), \(x) sum(x, na.rm = TRUE))) %>%  
+    pivot_longer(cols = everything(), names_to = "Samples", values_to = "Mapped_viral_reads")
+
+Viral_contigs <- Mastertable_viral %>% 
+    select(all_of(samples)) %>%
+    summarise(across(everything(), ~ sum( . > 0, na.rm = TRUE))) %>%  
+    pivot_longer(cols = everything(), names_to = "Samples", values_to = "Viral_contigs")
+
+COUNTS <- merge(Raw_reads, Trimmed_reads, by = "Samples")
+COUNTS$Percentage_trimmed <- (COUNTS$Trimmed_reads/COUNTS$Raw_reads)*100
+COUNTS <- merge(COUNTS, Hostout_reads, by = "Samples")
+COUNTS$Percentage_hostout <- (COUNTS$Hostout_reads/COUNTS$Raw_reads)*100
+COUNTS <- merge(COUNTS, Mapped_reads, by = "Samples")
+COUNTS$Percentage_mapped <- (COUNTS$Mapped_reads/COUNTS$Raw_reads)*100
+COUNTS <- merge(COUNTS, Contigs, by = "Samples")
+COUNTS <- merge(COUNTS, Mapped_viral_reads, by = "Samples", all = TRUE)
+COUNTS$Percentage_mapped_viral <- (COUNTS$Mapped_viral_reads/COUNTS$Raw_reads)*100
+COUNTS <- merge(COUNTS, Viral_contigs, by = "Samples", all = TRUE)
+```
+
+Summary count statistics on all samples:
+```{r}
+# Min, max and median for all samples
+summary(COUNTS[c("Samples","Raw_reads", "Trimmed_reads", "Hostout_reads", "Mapped_reads", "Mapped_viral_reads")] %>% filter(Samples %in% samples))
+
+# Min, max and median for acne samples
+summary(COUNTS[c("Samples","Raw_reads", "Trimmed_reads", "Hostout_reads", "Mapped_reads", "Mapped_viral_reads")] %>% filter(Samples %in% acne))
+
+# Min, max and median for healthy samples
+summary(COUNTS[c("Samples","Raw_reads", "Trimmed_reads", "Hostout_reads", "Mapped_reads", "Mapped_viral_reads")] %>% filter(Samples %in% healthy))
+
+# Min, max and median for positive controls
+summary(COUNTS[c("Samples","Raw_reads", "Trimmed_reads", "Hostout_reads", "Mapped_reads", "Mapped_viral_reads")] %>% filter(Samples == "iPC"))
+
+# Min, max and median for collection negative controls
+summary(COUNTS[c("Samples","Raw_reads", "Trimmed_reads", "Hostout_reads", "Mapped_reads", "Mapped_viral_reads")] %>% filter(Samples == "NC"))
+
+# Min, max and median for extraction negative controls
+summary(COUNTS[c("Samples","Raw_reads", "Trimmed_reads", "Hostout_reads", "Mapped_reads", "Mapped_viral_reads")] %>% filter(Samples == "iNC"))
+
+# Min, max and median for amplification negative controls
+summary(COUNTS[c("Samples","Raw_reads", "Trimmed_reads", "Hostout_reads", "Mapped_reads", "Mapped_viral_reads")] %>% filter(Samples == "aNC"))
+```
+
+**REFERENCE-GUIDED ASSEMBLY APPROACH**
+
+### Retrieve Esviritu abundance table
+
+```{r}
+esviritu_output <- read.delim("data/REFERENCE_GUIDED_ASSEMBLY/ESVIRITU/SUMMARY.detected_virus.info.tsv", header = TRUE)
+
+esviritu_output <- esviritu_output %>%
+    mutate(perc_covered = covered_bases / Length * 100)
+```
+
+### Define filtering threshold and clean abundance table
+
+```{r}
+nc_control_max <- esviritu_output %>%
+    filter(grepl("NC", sample_ID)) %>%
+    group_by(Accession) %>%
+    summarise(
+        nc_max_control_cov = max(perc_covered, na.rm = TRUE), .groups = "drop")
+
+pc_control_max <- esviritu_output %>%
+    filter(grepl("iPC", sample_ID)) %>%
+    group_by(Accession) %>%
+    summarise(
+        pc_max_control_cov = max(perc_covered, na.rm = TRUE), .groups = "drop")
+
+esviritu_output_clean_with_pc <- esviritu_output %>%
+    left_join(nc_control_max, by = "Accession") %>%
+    filter(is.na(nc_max_control_cov) | perc_covered >= 3 * nc_max_control_cov) %>%
+    select(-nc_max_control_cov)
+
+esviritu_output_clean <- esviritu_output_clean_with_pc %>%
+    left_join(pc_control_max, by = "Accession") %>%
+    filter(is.na(pc_max_control_cov) | perc_covered >= 3 * pc_max_control_cov) %>%
+    select(-pc_max_control_cov)
+
+esviritu_output_filtered_clean <- esviritu_output_clean %>%
+    filter(Length >= 10000 & perc_covered > 5 | Length < 10000 & covered_bases >= 500)
+```
+
+### Standardize detected taxa names
+
+```{r}
+esviritu_output_filtered_clean <- esviritu_output_filtered_clean %>%
+    mutate(
+        plot_taxa = case_when(
+            grepl("Cutibacterium phage|Propionibacterium phage|Pahexavirus", species) ~ "Cutibacterium phages",
+            grepl("Pseudomonas phage", species) ~ "Pseudomonas phages",
+            grepl("Streptococcus phage|Brussowvirus 20617", species) ~ "Streptococcus phages",
+            grepl("Staphylococcus phage|Andhravirus", species) ~ "Staphylococcus phages",
+            grepl("Enterobacter phage", species) ~ "Enterobacter phages",
+            grepl("Acinetobacter phage", species) ~ "Acinetobacter phages",
+            grepl("Hafnia phage", species) ~ "Hafnia phages",
+            grepl("Salmonella phage", species) ~ "Salmonella phages",
+            grepl("Klebsiella phage", species) ~ "Klebsiella phages",
+            grepl("Shigella phage", species) ~ "Shigella phages",
+            grepl("Escherichia phage|Stx2c-converting phage", species) ~ "Escherichia phages",
+            grepl("Alcaligenes phage", species) ~ "Alcaligenes phages",
+            grepl("Lactococcus phage", species) ~ "Lactococcus phages",
+            grepl("Gardnerella phage", species) ~ "Gardnerella phages",
+            grepl("Lactobacillus phage", species) ~ "Lactobacillus phages",
+            grepl("Paracoccus phage", species) ~ "Paracoccus phages",
+            grepl("Pectobacterium phage", species) ~ "Pectobacterium phages",
+            grepl("Bacteroides phage", species) ~ "Bacteroides phages",
+            grepl("Betapapillomavirus", species) ~ "Eukaryotic viruses\n(Betapapillomaviruses)",
+            grepl("Gammapapillomavirus", species) ~ "Eukaryotic viruses\n(Gammapapillomaviruses)",
+            grepl("Mupapillomavirus", species) ~ "Eukaryotic viruses\n(Mupapillomaviruses)",
+            grepl("Human papillomavirus", species) ~ "Eukaryotic viruses\n(Unclassified papillomaviruses)",
+            TRUE ~ "Unclassified"
+        )
+    ) %>%
+    mutate(
+        plot_taxa = case_when(
+            plot_taxa == "Unclassified" & grepl("Bacteriophage|phage|Phage", species) ~ "Unclassified phages",
+            plot_taxa == "Unclassified" & grepl("Cutibacterium phage|Propionibacterium phage|Pahexavirus", subspecies) ~ "Cutibacterium phages",
+            plot_taxa == "Unclassified" & grepl("Pseudomonas phage", subspecies) ~ "Pseudomonas phages",
+            plot_taxa == "Unclassified" & grepl("Streptococcus phage|Brussowvirus 20617", subspecies) ~ "Streptococcus phages",
+            plot_taxa == "Unclassified" & grepl("Staphylococcus phage|Andhravirus", subspecies) ~ "Staphylococcus phages",
+            plot_taxa == "Unclassified" & grepl("Acinetobacter phage", subspecies) ~ "Acinetobacter phages",
+            plot_taxa == "Unclassified" & grepl("Enterobacter phage", subspecies) ~ "Enterobacter phages",
+            plot_taxa == "Unclassified" & grepl("Salmonella phage", subspecies) ~ "Salmonella phages",
+            plot_taxa == "Unclassified" & grepl("Klebsiella phage", subspecies) ~ "Klebsiella phages",
+            plot_taxa == "Unclassified" & grepl("Shigella phage", subspecies) ~ "Shigella phages",
+            plot_taxa == "Unclassified" & grepl("Escherichia phage|Stx2c-converting phage", subspecies) ~ "Escherichia phages",
+            plot_taxa == "Unclassified" & grepl("Alcaligenes phage", subspecies) ~ "Alcaligenes phages",
+            plot_taxa == "Unclassified" & grepl("Lactococcus phage", subspecies) ~ "Lactococcus phages",
+            plot_taxa == "Unclassified" & grepl("Gardnerella phage", subspecies) ~ "Gardnerella phages",
+            plot_taxa == "Unclassified" & grepl("Lactobacillus phage", subspecies) ~ "Lactobacillus phages",
+            plot_taxa == "Unclassified" & grepl("Paracoccus phage", subspecies) ~ "Paracoccus phages",
+            plot_taxa == "Unclassified" & grepl("Pectobacterium phage", subspecies) ~ "Pectobacterium phages",
+            plot_taxa == "Unclassified" & grepl("Bacteroides phage", subspecies) ~ "Bacteroides phages",
+            plot_taxa == "Unclassified" & grepl("Actinomyces phage", subspecies) ~ "Actinomyces phages",
+            plot_taxa == "Unclassified" & grepl("Xylella phage", subspecies) ~ "Xylella phages",
+            plot_taxa == "Unclassified" & grepl("Corynebacterium phage", subspecies) ~ "Corynebacterium phages",
+            plot_taxa == "Unclassified" & grepl("Hafnia phage", subspecies) ~ "Hafnia phages",
+            plot_taxa == "Unclassified" & grepl("Bacteriophage|phage|Phages", subspecies) ~ "Unclassified phages",
+            plot_taxa == "Unclassified" & grepl("Betapapillomavirus", subspecies) ~ "Eukaryotic viruses\n(Betapapillomaviruses)",
+            plot_taxa == "Unclassified" & grepl("Gammapapillomavirus", subspecies) ~ "Eukaryotic viruses\n(Gammapapillomaviruses)",
+            plot_taxa == "Unclassified" & grepl("Mupapillomavirus", subspecies) ~ "Eukaryotic viruses\n(Mupapillomaviruses)",
+            plot_taxa == "Unclassified" & grepl("Human papillomavirus", subspecies) ~ "Eukaryotic viruses\n(Unclassified papillomaviruses)",
+            plot_taxa == "Unclassified" ~ "Eukaryotic viruses\n(others)",
+            TRUE ~ plot_taxa
+        )
+    )
+```
+
+## INDIVIDUAL SAMPLES
+
+**DE NOVO ASSEMBLY APPROACH**
+
+### Retrieve abundance table
+
+```{r}
+abundance_table_indiv <- read.delim("data/DE_NOVO_ASSEMBLY/INDIVIDUAL_SAMPLES/ABUNDANCES/abundance_table.csv", sep=",", header=T, check.names = FALSE)
+
+# Create 3 lists: all names, samples only, negative controls and positive controls
+allnames_indiv <- metadata_indiv_samples %>%
+    pull(SAMPLE_ID)
+
+samples_indiv <- metadata_indiv_samples %>% 
+    filter(!CONDITION == "Control") %>%
+    pull(SAMPLE_ID)
+
+acne_indiv <- metadata_indiv_samples %>% 
+    filter(CONDITION == "Acne") %>%
+    pull(SAMPLE_ID)
+
+healthy_indiv <- metadata_indiv_samples %>% 
+    filter(CONDITION == "Healthy") %>%
+    pull(SAMPLE_ID)
+
+neg_controls_indiv <- metadata_indiv_samples %>%
+    filter(grepl("NC", SAMPLE_ID)) %>%
+    pull(SAMPLE_ID)
+
+pos_controls_indiv <- metadata_indiv_samples %>%
+    filter(grepl("PC", SAMPLE_ID)) %>%
+    pull(SAMPLE_ID)
+```
+
+### Calculate prevalence and total abundances ---- 
+
+```{r}
+Prevalence_abundance_indiv <- abundance_table_indiv %>%
+    mutate(
+        PrevalenceSamples = rowSums(select(., all_of(samples_indiv)) != 0),
+        PrevalenceNegControls = rowSums(select(., all_of(neg_controls_indiv)) != 0),
+        PrevalencePosControls = rowSums(select(., all_of(pos_controls_indiv)) != 0),
+        AbundanceSamples = rowSums(select(., all_of(samples_indiv))),
+        AbundanceNegControls = rowSums(select(., all_of(neg_controls_indiv))),
+        AbundancePosControls = rowSums(select(., all_of(pos_controls_indiv)))) %>%
+    select(-all_of(allnames_indiv))
+```
+
+### Generate taxonomy table
+
+#### Load Diamond output
+
+```{r}
+Taxonomy_Diamond_indiv <- read.csv("data/DE_NOVO_ASSEMBLY/INDIVIDUAL_SAMPLES/VIRAL_CLASSIFICATION/DIAMOND/ADOVAC.1000_contigs_95-85_diamond_taxonomy.csv", header = TRUE, sep = ";")
+colnames(Taxonomy_Diamond_indiv) <- c('CONTIGS', 'Diamond_Classification', 'Diamond_Phylum', 'Diamond_Class', 'Diamond_Order', 'Diamond_Family', 'Diamond_Genus', 'Diamond_Species')
+```
+
+#### Load geNomad output
+
+```{r}
+Taxonomy_Genomad_indiv <- read.delim("data/DE_NOVO_ASSEMBLY/INDIVIDUAL_SAMPLES/VIRAL_CLASSIFICATION/GENOMAD/All_samples_clustered_95-85_virus_taxonomy.tsv", header = TRUE)
+colnames(Taxonomy_Genomad_indiv) <- c('CONTIGS', 'Genomad_Classification', 'Genomad_Realm', 'Genomad_Kingdom', 'Genomad_Phylum', 'Genomad_Class', 'Genomad_Order', 'Genomad_Family', 'Genomad_Subfamily', 'Genomad_Genus', 'Genomad_Species')
+Taxonomy_Genomad_indiv <- subset(Taxonomy_Genomad_indiv, select = -c(Genomad_Realm, Genomad_Kingdom, Genomad_Subfamily))
+```
+
+#### Merge outputs to build taxonomy table
+
+```{r}
+taxonomy_table_indiv <- abundance_table_indiv %>%
+    select(CONTIGS) %>%
+    left_join(Taxonomy_Diamond_indiv, by = "CONTIGS") %>%
+    left_join(Taxonomy_Genomad_indiv, by = "CONTIGS")
+```
+
+#### Identify eukaryotic viruses and phages based on ICTV's host source
+
+```{r}
+for (tool in annotations_tools){
+    classification <- paste0(tool, "_Classification")
+    for (rank in ICTV_ranks){
+        tool_rank <- paste0(tool, "_", rank)
+        if (tool_rank %in% colnames(taxonomy_table_indiv)){
+            taxonomy_table_indiv[,classification] <- ifelse(is.na(taxonomy_table_indiv[,classification]) | taxonomy_table_indiv[,classification] == "" | taxonomy_table_indiv[,classification] == "Root", 
+                                                      "Unknown", taxonomy_table_indiv[,classification])
+            taxonomy_table_indiv[,classification] <- ifelse(taxonomy_table_indiv[,classification] == "Viruses" & taxonomy_table_indiv[,tool_rank] %in% ICTV_phages_taxa_list,
+                                                      "Prokaryotic viruses", taxonomy_table_indiv[,classification])
+            taxonomy_table_indiv[,classification] <- ifelse(taxonomy_table_indiv[,classification] == "Viruses" & taxonomy_table_indiv[,tool_rank] %in% ICTV_eukvir_taxa_list,
+                                                      "Eukaryotic viruses", taxonomy_table_indiv[,classification])
+        }
+    }
+    taxonomy_table_indiv[,classification] <- ifelse(taxonomy_table_indiv[,classification] == "Viruses",
+                                              "Unclassified viruses", taxonomy_table_indiv[,classification])
+}
+
+taxonomy_table_indiv$Genomad_Classification <- ifelse(taxonomy_table_indiv$Genomad_Classification == "Unclassified", "Unclassified viruses", taxonomy_table_indiv$Genomad_Classification)
+
+levels <- c("Classification", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+
+for (tool in annotations_tools){
+    for (i in 1:(length(levels)-1)){
+        tool_rank <- paste0(tool, "_", levels[i+1])
+        if (tool_rank %in% colnames(taxonomy_table_indiv)){
+            tool_rank0 <- paste0(tool, "_", levels[i])
+            taxonomy_table_indiv[,tool_rank] <- ifelse(taxonomy_table_indiv[,tool_rank] == "" | is.na(taxonomy_table_indiv[,tool_rank]),
+                                                 gsub("Unclassified Unclassified", "Unclassified", paste("Unclassified", taxonomy_table_indiv[,tool_rank0])),
+                                                 taxonomy_table_indiv[,tool_rank])
+            taxonomy_table_indiv[,tool_rank] <- ifelse(taxonomy_table_indiv[,tool_rank] == "Unclassified Unknown", "Unknown", taxonomy_table_indiv[,tool_rank])
+        }
+    }        
+}
+
+rm(i, classification, rank, tool, tool_rank, tool_rank0)
+```
+
+#### Insert final classification of contigs in taxonomy table
+
+```{r}
+taxonomy_table_indiv$Final_Tool <- "1"
+
+taxonomy_table_indiv <- taxonomy_table_indiv %>%
+    mutate(
+        Final_Tool = case_when(
+            Genomad_Classification == "Prokaryotic viruses" & Final_Tool == "1" ~ "Genomad",
+            Diamond_Classification == "Eukaryotic viruses" & Final_Tool == "1" ~ "Diamond",
+            Genomad_Classification == "Unclassified viruses" & Final_Tool == "1" ~ "Genomad",
+            Diamond_Classification %in% c("Unclassified viruses", "Prokaryotic viruses") &
+                Genomad_Classification == "Eukaryotic viruses" & Final_Tool == "1" ~ "Tool clash",
+            Diamond_Classification == "Bacteria" & Final_Tool == "1" ~ "Diamond",
+            Diamond_Classification == "Eukaryota" & Final_Tool == "1" ~ "Diamond",
+            Diamond_Classification == "Archaea" & Final_Tool == "1" ~ "Diamond",
+            Diamond_Classification == "Unknown" & Final_Tool == "1" ~ "Diamond",
+            Genomad_Classification == "Unknown" & Final_Tool == "1" ~ "Genomad",
+            TRUE ~ Final_Tool
+        )
+    )
+
+for (i in 1:(length(levels))) {
+    final_level <- paste0("Final", "_", levels[i])
+    diamond_level <- paste0("Diamond", "_", levels[i])
+    genomad_level <- paste0("Genomad", "_", levels[i])
+    taxonomy_table_indiv[,final_level] <- ifelse(taxonomy_table_indiv$Final_Tool == "Diamond", taxonomy_table_indiv[,diamond_level],
+                                           ifelse(taxonomy_table_indiv$Final_Tool == "Genomad", taxonomy_table_indiv[,genomad_level], 
+                                                         ifelse(taxonomy_table_indiv$Final_Tool == "Tool clash", "Unclassified viruses", NA)))
+}
+```
+
+### Identify contaminants with decontam
+
+```{r}
+### Format the abundance table for the phyloseq object
+OTU <- abundance_table_indiv
+OTU[is.na(OTU)] <- 0
+row.names(OTU) <- OTU$CONTIGS
+OTU$CONTIGS <- NULL
+OTU <- as.matrix(OTU)
+
+### Format the taxonomy table for the phyloseq object
+TAX <- taxonomy_table_indiv
+row.names(TAX) <- TAX$CONTIGS
+TAX$CONTIGS <- NULL
+TAX <- as.matrix(TAX)
+
+OTU <- otu_table(OTU, taxa_are_rows=T)
+TAX <- tax_table(TAX)
+METADATA <- sample_data(transform(metadata_indiv_samples, row.names = SAMPLE_ID))
+
+ADOVAC <- phyloseq(OTU, TAX, METADATA)
+
+sample_data(ADOVAC)$is.neg <- sample_data(ADOVAC)$SAMPLE_ID %in% neg_controls_indiv
+contamdf.prev <- isContaminant(ADOVAC, method="prevalence", neg="is.neg", threshold = 0.1)
+
+contamdf.prev <- merge(contamdf.prev, Prevalence_abundance_indiv, by.x = 0, by.y = "CONTIGS", all = TRUE)
+colnames(contamdf.prev)[1] <- "CONTIGS"
+```
+
+### Generate Mastertable
+
+#### Load CheckV ouput
+
+```{r}
+CheckV_output_indiv <- read.delim("data/DE_NOVO_ASSEMBLY/INDIVIDUAL_SAMPLES/PHAGE_ANNOTATION/CHECKV/quality_summary_R.tsv", header = TRUE)
+colnames(CheckV_output_indiv) <- c('CONTIGS', 'provirus', 'proviral length', 'total_genes', 'viral_genes', 'checkv_quality', 'completeness')
+```
+
+#### Load geNomad ouput
+
+```{r}
+geNomad_output_indiv <- read.delim("data/DE_NOVO_ASSEMBLY/INDIVIDUAL_SAMPLES/VIRAL_CLASSIFICATION/GENOMAD/All_samples_clustered_95-85_virus_scores.tsv", header = TRUE)
+colnames(geNomad_output_indiv) <- c('CONTIGS', 'length', 'topology', 'coordinates', 'n_genes', 'genetic_code', 'virus_score', 'fdr', 'n_hallmarks', 'marker_enrichment')
+geNomad_output_indiv$CONTIGS <- gsub("\\|provirus_.*", "", geNomad_output_indiv$CONTIGS)
+  
+viromics_tools_table_indiv <- merge(CheckV_output_indiv, geNomad_output_indiv, by = "CONTIGS", all = TRUE)
+```
+
+#### Create a Mastertable merging abundance table, taxonomy table, and viromics tools 
+
+```{r}
+Mastertable_indiv <- merge(abundance_table_indiv, taxonomy_table_indiv[, grepl("CONTIGS|^Final_", colnames(taxonomy_table_indiv))], by = "CONTIGS", all = TRUE)
+Mastertable_indiv <- merge(Mastertable_indiv, viromics_tools_table_indiv, by = "CONTIGS", all = TRUE)
+Mastertable_indiv <- merge(Mastertable_indiv, contamdf.prev, by = "CONTIGS", all = TRUE)
+```
+
+#### Add genome length
+
+```{r}
+Mastertable_indiv$length[is.na(Mastertable_indiv$length)] <- gsub('.*_length_','',Mastertable_indiv$CONTIGS[is.na(Mastertable_indiv$length)])
+Mastertable_indiv$length <- as.numeric(gsub("_cov_.*","", Mastertable_indiv$length))
+```
+
+### Remove all contigs considered as contaminants and present in NEGATIVE controls
+
+```{r}
+Mastertable_decontam_indiv <- Mastertable_indiv[Mastertable_indiv$contaminant == "FALSE",]
+Mastertable_decontam_indiv <- Mastertable_indiv[!Mastertable_indiv$PrevalenceNegControls > 0,]
+```
+
+### Remove all contigs present in POSITIVE controls
+
+```{r}
+Mastertable_no_mock_indiv <- Mastertable_decontam_indiv[!(Mastertable_decontam_indiv$PrevalencePosControls > 0),]
+Mastertable_no_mock_indiv <- Mastertable_no_mock_indiv %>%
+    filter(!Final_Genus %in% c("Alphainfluenzavirus", "Betacoronavirus"))
+```
+
+### Remove all non-viral contigs
+
+```{r}
+Mastertable_viral_indiv <- Mastertable_no_mock_indiv %>% 
+    filter(grepl("viruses", Final_Classification)) %>%
+    select(-all_of(c(neg_controls_indiv, pos_controls_indiv)))
+```
+
+### Remove contigs that map to the human genome
+
+```{r}
+contigs_mapping_to_hg38 <- readLines("data/DE_NOVO_ASSEMBLY/INDIVIDUAL_SAMPLES/VIRAL_CLASSIFICATION/BLASTN/ADOVAC.blastn_against_hg38.txt")
+Mastertable_viral_indiv <- Mastertable_viral_indiv %>%
+    filter(!(CONTIGS %in% contigs_mapping_to_hg38))
+```
+
+### Generate counts table
+
+```{r}
+Raw_reads_indiv <- read.delim("data/DE_NOVO_ASSEMBLY/INDIVIDUAL_SAMPLES/COUNTS/ADOVAC.number_raw_reads.txt", header = FALSE, sep = "\t", col.names = c("Samples", "Raw_reads"))
+
+Trimmed_reads_indiv <- read.delim("data/DE_NOVO_ASSEMBLY/INDIVIDUAL_SAMPLES/COUNTS/ADOVAC.number_trimmed_reads.txt", header = FALSE, sep = "\t", col.names = c("Samples", "Trimmed_reads"))
+
+Mapped_reads_indiv <- data.frame(Samples = colnames(abundance_table_indiv[,-1]), Mapped_reads = as.vector(colSums(abundance_table_indiv[,-1], na.rm = TRUE)))
+
+Contigs_indiv <- data.frame(Samples = colnames(abundance_table_indiv[,-1]), Contigs = as.vector(colSums(abundance_table_indiv != 0, na.rm = TRUE)[-1]))
+
+Mapped_viral_reads_indiv <- Mastertable_viral_indiv %>% 
+    select(all_of(samples_indiv)) %>%
+    summarise(across(everything(), \(x) sum(x, na.rm = TRUE))) %>%  
+    pivot_longer(cols = everything(), names_to = "Samples", values_to = "Mapped_viral_reads")
+
+Viral_contigs_indiv <- Mastertable_viral_indiv %>% 
+    select(all_of(samples_indiv)) %>%
+    summarise(across(everything(), ~ sum( . > 0, na.rm = TRUE))) %>%  
+    pivot_longer(cols = everything(), names_to = "Samples", values_to = "Viral_contigs")
+
+COUNTS_indiv <- merge(Raw_reads_indiv, Trimmed_reads_indiv, by = "Samples")
+COUNTS_indiv$Percentage_trimmed <- (COUNTS_indiv$Trimmed_reads/COUNTS_indiv$Raw_reads)*100
+COUNTS_indiv <- merge(COUNTS_indiv, Mapped_reads_indiv, by = "Samples")
+COUNTS_indiv$Percentage_mapped <- (COUNTS_indiv$Mapped_reads/COUNTS_indiv$Raw_reads)*100
+COUNTS_indiv <- merge(COUNTS_indiv, Contigs_indiv, by = "Samples")
+COUNTS_indiv <- merge(COUNTS_indiv, Mapped_viral_reads_indiv, by = "Samples", all = TRUE)
+COUNTS_indiv$Percentage_mapped_viral <- (COUNTS_indiv$Mapped_viral_reads/COUNTS_indiv$Raw_reads)*100
+COUNTS_indiv <- merge(COUNTS_indiv, Viral_contigs_indiv, by = "Samples", all = TRUE)
+```
+
+Summary count statistics on all samples:
+```{r}
+# Min, max and median for all samples
+summary(COUNTS_indiv[c("Samples","Raw_reads", "Trimmed_reads", "Mapped_reads", "Mapped_viral_reads")] %>% filter(Samples %in% samples_indiv))
+
+# Min, max and median for acne samples
+summary(COUNTS_indiv[c("Samples","Raw_reads", "Trimmed_reads", "Mapped_reads", "Mapped_viral_reads")] %>% filter(Samples %in% acne_indiv))
+
+# Min, max and median for healthy samples
+summary(COUNTS_indiv[c("Samples","Raw_reads", "Trimmed_reads", "Mapped_reads", "Mapped_viral_reads")] %>% filter(Samples %in% healthy_indiv))
+
+# Min, max and median for positive controls
+summary(COUNTS_indiv[c("Samples","Raw_reads", "Trimmed_reads", "Mapped_reads", "Mapped_viral_reads")] %>% filter(Samples == "iPC"))
+
+# Min, max and median for collection negative controls
+summary(COUNTS_indiv[c("Samples","Raw_reads", "Trimmed_reads", "Mapped_reads", "Mapped_viral_reads")] %>% filter(Samples == "NC"))
+
+# Min, max and median for extraction negative controls
+summary(COUNTS_indiv[c("Samples","Raw_reads", "Trimmed_reads", "Mapped_reads", "Mapped_viral_reads")] %>% filter(Samples == "iNC"))
+
+# Min, max and median for amplification negative controls
+summary(COUNTS_indiv[c("Samples","Raw_reads", "Trimmed_reads", "Mapped_reads", "Mapped_viral_reads")] %>% filter(Samples == "aNC"))
+```
+
+# Color palettes
+
+Colors for de novo viral families:
+```{r echo=FALSE}
+MyColorsViralFamilies <- c(
+    "Ackermannviridae" = "#E5C494",
+    "Arenbergviridae" = "#b7ffa0",
+    "Autographiviridae" = "#bd2fb1",
+    "Casjensviridae" = "#99ffe5",
+    "Chimalliviridae" = "#b7ffa0",
+    "Drexlerviridae" = "#fffa4a",
+    "Duinviridae" = "#8ac1ff",
+    "Fredfastierviridae" = "#a5e1ea",
+    "Hafunaviridae" = "#9c1e41",
+    "Inoviridae" = "#FC8D62",
+    "Microviridae" = "#CCEBC5",
+    "Partitiviridae" = "#a5e1ea",
+    "Peduoviridae" = "#FFFFB3",
+    "Straboviridae" = "#ccab9e",
+    "Zierdtviridae" = "#fc6060",
+    "Zobellviridae" = "#e33dd4",
+    "Unclassified Caudoviricetes" = "#80B1D3",
+    "Eupolintoviridae" = "#2748a0",
+    "Nudiviridae" = "#FBE426",
+    "Orthototiviridae" = "#FB6496",
+    "Papillomaviridae" = "#778B00",
+    "Parvoviridae" = "#FCCDE5",
+    "Polymycoviridae" = "#2ED9FF",
+    "Spinareoviridae" = "#DEA0FD",
+    "Virgaviridae" = "#33a02c",
+    "Unclassified Ghabrivirales" = "#f72d70",
+    "Unclassified Naedrevirales" = "#FFCC99",
+    "Unclassified viruses" = "#8E8E8E"
+    )
+```
+
+```{r echo=FALSE, fig.width=9, fig.height=4.5, fig.align='center'}
+pal.bands(MyColorsViralFamilies, main = "MyColorsViralFamilies")
+```
+
+Colors for orthototiviridae species:
+```{r echo=FALSE}
+MyColorsOrthototi <- c(
+    "DermYa Orthototivirus 1" = "#F4B5BD",
+    "DermYa Orthototivirus 2" = "#FAD77B",
+    "DermYa Orthototivirus 3" = "#7b9c4a",
+    "Malassezia globosa associated totivirus 1" = "#85D4E3",
+    "Totivirus go" = "#D5D5D3",
+    "Totivirus nijyuroku" = "#D67236",
+    "Unclassified Orthototiviridae" = "#CDC08C"
+    )
+```
+
+```{r echo=FALSE, fig.width=9, fig.height=6, fig.align='center'}
+pal.bands(MyColorsOrthototi, main = "MyColorsOrthototi")
+```
+
+Colors for lesion types:
+```{r echo=FALSE}
+MyColorsLesionsInfl <- c(
+    "Healthy\nControl Group" = "#a2b3a5",
+    "No lesions" = "#90D4CC",
+    "Non-inflammatory\nlesions" = "#E37F78",
+    "Inflammatory\nlesions" = "#87231C"
+    )
+```
+
+```{r echo=FALSE, fig.width=9, fig.height=4.5, fig.align='center'}
+pal.bands(MyColorsLesionsInfl, main = "MyColorsLesionsInfl")
+```
+
+Colors for condition:
+```{r echo=FALSE}
+MyColorsCondition <- c(
+    "Healthy" = "#a2b3a5",
+    "Acne" = "#E37F78")
+```
+
+```{r echo=FALSE, fig.width=9, fig.height=4.5, fig.align='center'}
+pal.bands(MyColorsCondition, main = "MyColorsCondition")
+```
+
+Colors for bacterial hosts:
+```{r echo=FALSE}
+MyColorsHostGenus <- c(
+    "Acinetobacter"= "#bd2fb1",
+    "Alcaligenes" = "#FB8072",
+    "Aliterella" = "#2ED9FF",
+    "Anoxybacillus" = "#E0FF66",
+    "Citrobacter" = "#FCCDE5",
+    "Cutibacterium" = "#FEDEB9",
+    "Enterobacter" = "#0b6323",
+    "Flavobacterium" = "#FBE426",
+    "Gleimia" = "#ff4848",
+    "Lawsonella" = "#E7298A",
+    "Nostoc" = "#325A9B",
+    "Paracoccus" = "#0F13F0",
+    "Proteus" = "#FFFFB3",
+    "Pseudomonas" = "#FF7F00",
+    "Staphylococcus" = "#33A02C",
+    "Streptococcus" = "#CCEBC5",
+    "Yersinia" = "#A52A3C",
+    "Other host genera" = "#8E8E8E",
+    "No iPHoP hit" = "#CCCCCC")
+```
+
+```{r echo=FALSE, fig.width=9, fig.height=4.5, fig.align='center'}
+pal.bands(MyColorsHostGenus, main = "MyColorsHostGenus")
+```
+
+Colors for Esviritu detected species:
+```{r echo=FALSE}
+MyColorsEsviritu <- c(
+    "Actinomyces phages" = "#B15928", 
+    "Bacteroides phages" = "#17BECF", 
+    "Corynebacterium phages" = "#1F78B4", 
+    "Cutibacterium phages" = "#FEDEB9",
+    "Enterobacter phages" = "#0b6323", 
+    "Escherichia phages" = "#FFBB00", 
+    "Gardnerella phages" = "#A13700",
+    "Klebsiella phages" = "#8AFFEB", 
+    "Lactobacillus phages" = "#FF75F0", 
+    "Lactococcus phages" = "#BCBD22", 
+    "Paracoccus phages" = "#0F13F0", 
+    "Pectobacterium phages" = "#f7f734", 
+    "Pseudomonas phages" = "#FF7F00", 
+    "Salmonella phages" = "#E8F6FC",
+    "Staphylococcus phages" = "#33A02C",
+    "Streptococcus phages" = "#CCEBC5",
+    "Unclassified phages" = "#636363",
+    "Eukaryotic viruses\n(Betapapillomaviruses)" = "#BC80BD",
+    "Eukaryotic viruses\n(Gammapapillomaviruses)" = "#7570B3",
+    "Eukaryotic viruses\n(Mupapillomaviruses)" = "#9467BD",
+    "Eukaryotic viruses\n(Unclassified papillomaviruses)" = "#6A3D9A",
+    "Eukaryotic viruses\n(others)" = "#DADAEB")
+```
+
+```{r echo=FALSE, fig.width=9, fig.height=4.5, fig.align='center'}
+pal.bands(MyColorsEsviritu, main = "MyColorsEsviritu")
+```
+
+# Visualizations
+
+## Figure 1
+
+### Figure 1a
+```{r, fig.width = 8, fig.height = 4, fig.align = 'center'}
+data_plot <- COUNTS %>% 
+    filter(Samples %in% c(samples)) %>%
+    select(Raw_reads, Trimmed_reads, Hostout_reads, Mapped_reads, Mapped_viral_reads) %>%
+    summarise(across(everything(), \(x) sum(x, na.rm = TRUE))) %>%  
+    pivot_longer(cols = everything(),
+                 names_to = "Subgroup",
+                 values_to = "Total") %>%
+    mutate(Percentage = Total / Total[Subgroup == "Raw_reads"] * 100)
+
+data_plot <- data_plot %>% 
+    mutate(Subgroup = factor(Subgroup, levels = c("Raw_reads", "Trimmed_reads", "Hostout_reads", "Mapped_reads", "Mapped_viral_reads"),
+                             labels = c("Raw","Deduplicated\n+ Trimmed", "After host\nremoval",
+                                        "Mapping to de novo\nassembled contigs",
+                                        "Mapping to viral OTUs"))) 
+
+ggplot(data_plot, aes(x = Subgroup, y = Percentage, fill = Subgroup)) +
+    geom_col() +
+    scale_fill_manual(values =  c(wes_palette("Moonrise2"), wes_palette("Moonrise1"))) +
+    theme_minimal() +
+    theme (
+        axis.title.x = element_blank(),
+        panel.grid = element_blank(),
+        axis.line = element_line(color = "black"),
+        axis.ticks = element_line(color = "black"),
+        axis.text.x = element_markdown(),
+        legend.position = " none") +
+    geom_text(aes(label = paste0(round(Percentage, digits = 1), "%\nN = ", scientific(Total))), position = position_dodge(width = 0.9), vjust = -0.5) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.24)))
+```
+
+### Figure 1b
+```{r, fig.width = 6, fig.height = 4, fig.align = 'center'}
+data_plot <- Mastertable_viral %>%
+    select(CONTIGS, Final_Classification, length) %>%
+    mutate(Final_Classification = factor(Final_Classification, levels = c("Unclassified viruses", "Eukaryotic viruses", "Prokaryotic viruses")))
+
+ggplot(data_plot, aes(length, fill = Final_Classification, color = Final_Classification)) +
+    geom_histogram(binwidth = 0.1, position = "stack", linewidth = 0.2) +
+    scale_fill_manual(values = alpha(wes_palette("Cavalcanti1")[c(5, 1, 2)], 0.5)) +
+    scale_color_manual(values = c("white", "white", "white")) +
+    scale_x_log10(breaks = c(1000, 5000, 10000, 50000, 100000),
+                  labels = c("1kb", "5kb", "10kb", "50kb", "100kb")) +
+    labs(y = "Number of vOTUs", x = "Length of vOTUs (Log10)") +
+    theme_minimal() +
+    theme(text = element_text(size = 12),
+          axis.title.x = element_text(margin = margin(t = 10)),
+          axis.title.y = element_text(margin = margin(r = 10)),
+          panel.grid.minor = element_blank(),
+          panel.grid.major = element_blank(),
+          axis.line = element_line(color = "black"),
+          axis.ticks = element_line(color = "black"),
+          legend.title = element_blank(),
+          legend.position = "top") +
+    guides(fill = guide_legend(reverse = TRUE), color = guide_legend(reverse = TRUE))+
+    scale_y_continuous(expand = expansion(mult = c(0, 0.05)))
+```
+
+## Figure 2
+
+### Figure 2a
+```{r, fig.width = 18, fig.height = 4, fig.align = 'center'}
+
+samples_with_reads <- Mastertable_viral %>%
+    select(all_of(samples)) %>%
+    summarise(across(everything(), sum, na.rm = TRUE)) %>%
+    select_if(~ . > 0) %>%
+    colnames()
+
+abundances_TPM_pos_only <- Mastertable_viral %>%
+    select(all_of(c("CONTIGS", "length", samples_with_reads)), all_of(grep("^Final", colnames(Mastertable_viral)))) %>%
+    pivot_longer(cols = samples_with_reads, names_to = "SAMPLE_ID", values_to = "mapped_reads") 
+
+abundances_TPM_pos_only$RPK <- abundances_TPM_pos_only$mapped_reads/abundances_TPM_pos_only$length
+
+data_plot <- abundances_TPM_pos_only %>%
+    group_by(SAMPLE_ID, Final_Family) %>%
+    summarize(RPK = sum(RPK), .groups = "drop_last")
+
+data_plot <- data_plot %>%
+    group_by(SAMPLE_ID) %>%
+    mutate(RPK_total = sum(RPK),
+           TPM = (RPK / RPK_total) * 10^6)
+
+data_plot <- merge(data_plot, metadata, by = "SAMPLE_ID", all = FALSE)
+
+data_summary <- data_plot %>%
+    mutate(LESION_INFL = factor(LESION_INFL, levels = c("Healthy", "No_lesions", "Non-inflammatory_lesions", "Inflammatory_lesions"),
+            labels = c("Healthy Control Group", "No lesions", "Non-inflammatory lesions", "Inflammatory lesions")))
+
+data_summary <- data_summary %>%
+    mutate(Final_Family = factor(Final_Family, levels = rev(names(MyColorsViralFamilies))))
+
+ggplot(data_summary, aes(x = TPM, y = PID, fill = Final_Family)) +
+    geom_bar(stat = "identity") + 
+    labs(x = "Relative Abundance of Viral Families in Transcripts Per Kilobase Million (TPM)", y = "", fill = "Viral Family")  +
+    scale_fill_manual(values=MyColorsViralFamilies, guide = guide_legend(ncol = 1)) +
+    theme_minimal() +
+    theme(text = element_text(size = 10),
+          axis.title.x = element_text(margin = margin(t = 10)),
+          strip.text = element_text(size = 12),
+          legend.direction = "vertical",
+          panel.grid.minor = element_blank(),
+          panel.spacing = unit(0.5, "cm")) +
+    guides(fill=guide_legend(reverse = TRUE, nrow = 15)) +
+    scale_y_discrete(limits = rev) +
+    scale_x_continuous(labels = comma) +
+    facet_wrap(~ LESION_INFL, scales = "free", nrow = 1)
+```
+
+### Figure 2b
+```{r, fig.width = 6, fig.height = 3, fig.align = 'center'}
+samples_with_reads <- Mastertable_viral_indiv %>%
+    select(all_of(samples_indiv)) %>%
+    summarise(across(everything(), sum, na.rm = TRUE)) %>%
+    select_if(~ . > 0) %>%
+    colnames()
+
+abundances_TPM_pos_only <- Mastertable_viral_indiv %>%
+    select(all_of(c("CONTIGS", "length", samples_with_reads)), all_of(grep("^Final", colnames(Mastertable_viral_indiv)))) %>%
+    pivot_longer(cols = samples_with_reads, names_to = "SAMPLE_ID", values_to = "mapped_reads") 
+
+abundances_TPM_pos_only$RPK <- abundances_TPM_pos_only$mapped_reads/abundances_TPM_pos_only$length
+
+data_plot <- abundances_TPM_pos_only %>%
+    group_by(SAMPLE_ID, Final_Family) %>%
+    summarize(RPK = sum(RPK), .groups = "drop_last")
+
+data_plot <- data_plot %>%
+    group_by(SAMPLE_ID) %>%
+    mutate(RPK_total = sum(RPK),
+           TPM = (RPK / RPK_total) * 10^6)
+
+data_plot <- merge(data_plot, metadata_indiv_samples, by = "SAMPLE_ID", all = FALSE)
+
+data_summary <- data_plot %>%
+    group_by(PID, SAMPLE_TYPE, Final_Family) %>%
+    summarize(mean_TPM_patient = mean(TPM), 
+              n_per_PID = n(), .groups = "drop")
+
+data_summary <- data_summary %>%
+    mutate(SAMPLE_TYPE = factor(SAMPLE_TYPE, levels = c("Skin gel strip", "Skin swab"),
+                              labels = c("Skin gel strips", "Skin swabs")))
+
+counts <- data_summary %>% 
+    group_by(SAMPLE_TYPE) %>% 
+    summarise(N = n_distinct(PID))
+
+x_labels <- setNames(paste0(levels(data_summary$SAMPLE_TYPE), "\nN = ", counts$N), levels(data_summary$SAMPLE_TYPE))
+
+stat.test <- data_summary %>% 
+    group_by(Final_Family) %>%
+    wilcox_test(mean_TPM_patient ~ SAMPLE_TYPE, paired = TRUE) %>%
+    add_significance() %>%
+    mutate(y.position = 1050000)
+
+data_summary <- data_summary %>%
+    mutate(Final_Family = factor(Final_Family, levels = names(MyColorsViralFamilies)))
+
+stat.test$Final_Family <- factor(stat.test$Final_Family, levels = levels(data_summary$Final_Family))
+
+data_summary <- data_summary %>%
+    filter(Final_Family %in% stat.test$Final_Family[!stat.test$p.signif == "ns"])
+
+ggplot(data_summary, (aes(x=SAMPLE_TYPE, y = mean_TPM_patient))) +
+    geom_boxplot(aes(color = Final_Family, fill = Final_Family), width = 0.5, alpha = 0.4, outlier.shape = NA) +
+    geom_jitter(aes(color = Final_Family), width = 0.1, height = 0, size = 1.5, alpha = 0.3) +
+    scale_fill_manual(values = MyColorsViralFamilies) +
+    scale_color_manual(values = MyColorsViralFamilies) +
+    labs(x = "", y = "Relative Abundance of Viral Families \nin Transcripts Per Kilobase Million (TPM)") +
+    theme_minimal() +
+    theme(text = element_text(size = 10),
+          panel.grid.major.x = element_blank(),
+          panel.grid.minor.y = element_blank(),
+          legend.position = "none",
+          strip.text = element_text(margin = margin(b = 10, t = 10))) +
+    scale_x_discrete(labels = x_labels) +
+    scale_y_continuous(labels = comma) +
+    facet_wrap(~Final_Family, scales = "free_x", strip.position = "top", nrow = 1) +
+    stat_pvalue_manual(stat.test, label = "p.signif", hide.ns = TRUE, tip.length = 0) +
+    coord_cartesian(ylim = c(0, 1000000), clip = "off")
+```
+
+```{r echo=FALSE}
+datatable(stat.test)
+```
+
+### Figure 2c
+```{r, fig.width = 17, fig.height = 4, fig.align = 'center'}
+samples_with_reads <- Mastertable_viral %>%
+    filter(Final_Classification == "Prokaryotic viruses") %>%
+    select(all_of(samples)) %>%
+    summarise(across(everything(), sum, na.rm = TRUE)) %>%
+    select_if(~ . > 0) %>%
+    colnames()
+
+abundances_TPM_pos_only <- Mastertable_viral %>%
+    filter(Final_Classification == "Prokaryotic viruses") %>%
+    select(c("CONTIGS", "length"), all_of(samples_with_reads), all_of(grep("^Host", colnames(Mastertable_viral)))) %>%
+    pivot_longer(cols = samples_with_reads, names_to = "SAMPLE_ID", values_to = "mapped_reads") 
+
+abundances_TPM_pos_only$RPK <- abundances_TPM_pos_only$mapped_reads/abundances_TPM_pos_only$length
+
+data_plot <- abundances_TPM_pos_only %>%
+    group_by(SAMPLE_ID, Host_Genus) %>%
+    summarize(RPK = sum(RPK), .groups = 'drop')
+
+data_plot <- data_plot %>%
+    group_by(SAMPLE_ID) %>%
+    mutate(RPK_total = sum(RPK),
+           TPM = (RPK / RPK_total) * 10^6)
+
+data_plot <- merge(data_plot, metadata, by = "SAMPLE_ID", all = FALSE)
+
+data_summary <- data_plot %>%
+    mutate(Host_Genus = ifelse(is.na(Host_Genus), "No iPHoP hit", Host_Genus)) %>%
+    group_by(LESION_INFL, Host_Genus) %>%
+    mutate(Host_Genus = ifelse(mean(TPM) > 10000, Host_Genus, "Other host genera")) 
+
+data_summary <- data_summary %>%
+    mutate(LESION_INFL = factor(LESION_INFL, levels = c("Healthy", "No_lesions", "Non-inflammatory_lesions", "Inflammatory_lesions"),
+                                labels = c("Healthy Control Group", "No lesions", "Non-inflammatory lesions", "Inflammatory lesions")))
+
+data_summary <- data_summary %>%
+    mutate(Host_Genus = factor(Host_Genus, levels = rev(names(MyColorsHostGenus))))
+
+ggplot(data_summary, aes(x = TPM, y = PID, fill = Host_Genus)) +
+    geom_bar(stat = "identity") + 
+    labs(x = "Relative Abundance of Phages in Transcripts Per Kilobase Million (TPM)", y = "", fill = "Bacterial Host Genus")  +
+    scale_fill_manual(values=MyColorsHostGenus, guide = guide_legend(ncol = 1)) +
+    theme_minimal() +
+    theme(text = element_text(size = 10),
+          axis.title.x = element_text(margin = margin(t = 10)),
+          strip.text = element_text(size = 12),
+          legend.direction = "vertical",
+          panel.grid.minor = element_blank(),
+          panel.spacing = unit(0.5, "cm")) +
+    guides(fill=guide_legend(reverse = TRUE, nrow = 10)) +
+    scale_y_discrete(limits = rev) +
+    scale_x_continuous(labels = comma) +
+    facet_wrap(~ LESION_INFL, scales = "free", nrow = 1)
+```
+
+## Figure 3
+```{r, fig.width = 10, fig.height = 10, fig.align = 'center'}
+acc_to_species <- setNames(
+    orthototi_references$Species,
+    orthototi_references$Accession)
+
+tree_orthototi$tip.label <- ifelse(
+    tree_orthototi$tip.label %in% names(acc_to_species),
+    acc_to_species[tree_orthototi$tip.label],
+    tree_orthototi$tip.label)
+
+tree_orthototi$tip.label <- case_when(
+    tree_orthototi$tip.label == "NODE_A5_length_4617_cov_1992.922907_201_NIL_1" ~ "DermYa_orthototivirus_1c_A01_NIL",
+    tree_orthototi$tip.label == "NODE_A7_length_4035_cov_296.875442_202_NIL_2" ~ "DermYa_orthototivirus_1b_A02_NIL",
+    tree_orthototi$tip.label == "NODE_A3_length_3754_cov_510.757139_208_NL_2" ~ "DermYa_orthototivirus_1a_A08_NL",
+    tree_orthototi$tip.label == "NODE_A2_length_4560_cov_988.028998_207_NIL_2" ~ "DermYa_orthototivirus_1d_A07_NIL",
+    tree_orthototi$tip.label == "NODE_A4_length_4357_cov_849.579673_202_NIL_1" ~ "DermYa_orthototivirus_1f_A02_NIL",
+    tree_orthototi$tip.label == "NODE_A2_length_4385_cov_213.898561_209_NIL_1" ~ "DermYa_orthototivirus_1e_A09_NIL",
+    tree_orthototi$tip.label == "NODE_A7_length_4529_cov_1142.607143_201_NIL_2" ~ "DermYa_orthototivirus_2d_A01_NIL",
+    tree_orthototi$tip.label == "NODE_A5_length_4306_cov_548.590683_202_NIL_2" ~ "DermYa_orthototivirus_2c_A02_NIL",
+    tree_orthototi$tip.label == "NODE_B3_length_4150_cov_18.108765_204_IL_3" ~ "DermYa_orthototivirus_2b_A04_IL",
+    tree_orthototi$tip.label == "NODE_A4_length_4345_cov_666.457826_210_NIL_1" ~ "DermYa_orthototivirus_2a_A10_NIL",
+    tree_orthototi$tip.label == "NODE_A20_length_2839_cov_217.490224_202_IL_2" ~ "DermYa_orthototivirus_2e_A02_IL",
+    tree_orthototi$tip.label == "NODE_A459_length_3790_cov_391.695933_205_NL_2" ~ "DermYa_orthototivirus_3a_A05_NL",
+    tree_orthototi$tip.label == "NODE_A4_length_3989_cov_367.484918_203_IL_1" ~ "MgaTV1-like_DermYa_orthototivirus_a_A03_IL",
+    tree_orthototi$tip.label == "NODE_A7_length_4436_cov_766.079147_207_IL_1" ~ "MgaTV1-like_DermYa_orthototivirus_b_A07_IL",
+    tree_orthototi$tip.label == "NODE_B4_length_4565_cov_256.290775_201_NIL_2" ~ "MgaTV1-like_DermYa_orthototivirus_c_A01_NIL",
+    tree_orthototi$tip.label == "NODE_B3_length_4216_cov_20.329548_203_IL_2" ~ "MgaTV1-like_DermYa_orthototivirus_d_A03_IL",
+    tree_orthototi$tip.label == "NODE_C2_length_4677_cov_22.134130_201_NL_1" ~ "MgaTV1-like_DermYa_orthototivirus_e_A01_NL",
+    tree_orthototi$tip.label == "NODE_A3_length_4441_cov_413.878552_202_NIL_1" ~ "MgaTV1-like_DermYa_orthototivirus_f_A02_NIL",
+    tree_orthototi$tip.label == "NODE_A7_length_2919_cov_758.850106_203_NIL_1" ~ "MgaTV1-like_DermYa_orthototivirus_g_A03_NIL",
+    tree_orthototi$tip.label == "NODE_B3_length_4672_cov_149.410229_210_NIL_1" ~ "MgaTV1-like_DermYa_orthototivirus_h_A10_NIL",
+    tree_orthototi$tip.label == "NODE_A8_length_3367_cov_1213.206383_208_NL_1" ~ "MgaTV1-like_DermYa_orthototivirus_i_A08_NL",
+    TRUE ~ tree_orthototi$tip.label)
+
+ggtree(tree_orthototi) +
+    geom_tiplab(size = 3, align = TRUE) +
+    geom_text2(aes(subset = !isTip, label = label), hjust = -0.2, size = 2) +
+    geom_hilight(node = 68, fill = "#85D4E3", alpha = 0.3, extend=8) + 
+    geom_hilight(node = 78, fill = "#FAD77B", alpha = 0.3, extend=8) + 
+    geom_hilight(node = 23, fill = "#7b9c4a", alpha = 0.3, extend=8) + 
+    geom_hilight(node = 61, fill = "#F4B5BD", alpha = 0.3, extend=8) + 
+    theme_tree() +
+    xlim_tree(8)
+```
+
+## Figure 4
+
+### Figure 4a
+```{r, fig.width = 15, fig.height = 4, fig.align = 'center'}
+samples_with_reads <- Mastertable_viral %>%
+    filter(Final_Family == "Orthototiviridae") %>%
+    select(all_of(samples)) %>%
+    summarise(across(everything(), sum, na.rm = TRUE)) %>%
+    select_if(~ . > 0) %>%
+    colnames()
+
+abundances_TPM_pos_only <- Mastertable_viral %>%
+    select(all_of(c("CONTIGS", "length", samples_with_reads)), all_of(grep("^Final", colnames(Mastertable_viral)))) %>%
+    pivot_longer(cols = samples_with_reads, names_to = "SAMPLE_ID", values_to = "mapped_reads") 
+
+abundances_TPM_pos_only$RPK <- abundances_TPM_pos_only$mapped_reads/abundances_TPM_pos_only$length
+
+data_plot <- abundances_TPM_pos_only %>%
+    filter(Final_Family == "Orthototiviridae") %>%
+    group_by(SAMPLE_ID, Final_Species) %>%
+    summarize(RPK = sum(RPK), .groups = "drop_last")
+
+data_plot <- data_plot %>%
+    group_by(SAMPLE_ID) %>%
+    mutate(RPK_total = sum(RPK),
+           TPM = (RPK / RPK_total) * 10^6)
+
+data_plot <- merge(data_plot, metadata, by = "SAMPLE_ID", all = FALSE)
+
+data_summary <- data_plot %>%
+    mutate(LESION_INFL = factor(LESION_INFL, levels = c("Healthy", "No_lesions", "Non-inflammatory_lesions", "Inflammatory_lesions"),
+                                labels = c("Healthy Control Group", "No lesions", "Non-inflammatory lesions", "Inflammatory lesions")))
+
+data_summary <- data_summary %>%
+    mutate(Final_Species = factor(Final_Species, levels = rev(names(MyColorsOrthototi))))
+
+ggplot(data_summary, aes(x = TPM, y = PID, fill = Final_Species)) +
+    geom_bar(stat = "identity") + 
+    labs(x = "Relative Abundance of Orthototiviruses in Transcripts Per Kilobase Million (TPM)", y = "", fill = "Orthototiviridae Species")  +
+    scale_fill_manual(values=MyColorsOrthototi, guide = guide_legend(ncol = 1)) +
+    theme_minimal() +
+    theme(text = element_text(size = 10),
+          axis.title.x = element_text(margin = margin(t = 10)),
+          strip.text = element_text(size = 12),
+          legend.direction = "vertical",
+          panel.grid.minor = element_blank(),
+          panel.spacing = unit(0.5, "cm")) +
+    guides(fill=guide_legend(reverse = TRUE)) +
+    scale_y_discrete(limits = rev) +
+    scale_x_continuous(labels = comma) +
+    facet_wrap(~ LESION_INFL, scales = "free", nrow = 1)
+```
+
+### Figure 4b
+```{r, fig.width = 6, fig.height = 4, fig.align = 'center'}
+abundances_TPM <- Mastertable_viral %>%
+    filter(Final_Family == "Orthototiviridae") %>%
+    select(c("CONTIGS", "length"), all_of(samples), all_of(grep("^Final", colnames(Mastertable_viral)))) %>%
+    pivot_longer(cols = samples, names_to = "SAMPLE_ID", values_to = "mapped_reads") 
+
+abundances_TPM$RPK <- abundances_TPM$mapped_reads/abundances_TPM$length
+
+abundances_TPM <- abundances_TPM %>%
+    filter(Final_Family == "Orthototiviridae") %>%
+    group_by(SAMPLE_ID, Final_Species) %>%
+    summarize(RPK = sum(RPK), .groups = 'drop')
+
+abundances_TPM <- abundances_TPM %>%
+    group_by(SAMPLE_ID) %>%
+    mutate(RPK_total = sum(RPK),
+           TPM = (RPK / RPK_total) * 10^6)
+
+abundances_TPM$TPM[is.nan(abundances_TPM$TPM)] <- 0
+
+data_plot <- merge(abundances_TPM, metadata, by = "SAMPLE_ID", all = FALSE)
+
+data_summary <- data_plot %>%
+    group_by(PID, LESION_INFL) %>%
+    summarize(observed_richness = sum(TPM > 0), 
+              shannon_diversity = diversity(c_across(TPM), index = "shannon"),
+              .groups = "drop") %>%
+    ungroup()
+
+data_summary <- data_summary %>%
+    mutate(LESION_INFL = factor(LESION_INFL, levels = c("Healthy", "No_lesions", "Non-inflammatory_lesions", "Inflammatory_lesions"),
+                                labels = c("Healthy\nControl Group", "No lesions", "Non-inflammatory\nlesions", "Inflammatory\nlesions")))
+
+counts <- data_summary %>%
+    group_by(LESION_INFL) %>%
+    summarise(N = n_distinct(PID))
+
+x_labels <- setNames(paste0(levels(data_summary$LESION_INFL), "\nN = ", counts$N), levels(data_summary$LESION_INFL))
+
+model <- glmmTMB(
+    observed_richness ~ LESION_INFL + (1|PID),
+    family = compois,
+    data = data_summary)
+
+sim <- simulateResiduals(model)
+testUniformity(sim, plot = FALSE)
+testDispersion(sim, plot = FALSE)
+testZeroInflation(sim, plot = FALSE)
+
+estimated_marginal_means <- emmeans(model, ~ LESION_INFL)
+
+pw_comparisons <- pairs(estimated_marginal_means, adjust = "BH")
+
+pw_cmp_df <- as.data.frame(summary(pw_comparisons))
+pw_cmp_df$contrast <- gsub("[()]", "", pw_cmp_df$contrast)
+
+stat.test <- pw_cmp_df %>%
+    mutate(
+        group1 = sub(" - .*", "", contrast),
+        group2 = sub(".* - ", "", contrast),
+        y.position = max(data_summary$observed_richness, na.rm = TRUE) + seq(0.5, 3, by = 0.5)) %>%
+    add_significance(p.col = "p.value", output.col = "p.adj.signif")
+
+ggplot(data_summary, aes(x = LESION_INFL, y = observed_richness)) +
+    geom_boxplot(aes(color = LESION_INFL, fill = LESION_INFL), width = 0.5, alpha = 0.4, outlier.shape = NA) +
+    geom_jitter(aes(color = LESION_INFL), width = 0.2, height = 0, size = 1.5, alpha = 0.5) +
+    scale_fill_manual(values = MyColorsLesionsInfl) +
+    scale_color_manual(values = MyColorsLesionsInfl) +
+    scale_x_discrete(labels = x_labels) +
+    labs(x = "", y = expression(atop("Observed Richness",
+                                     "of" ~ italic("Orthototiviridae") ~ "Species"))) +
+    theme_minimal() +
+    theme(element_text(size = 10),
+          panel.grid.major.x = element_blank(),
+          panel.grid.major.y = element_line(linewidth = 1.2),
+          axis.title.y = element_text(vjust = 2, margin = margin(r = 15)),
+          legend.position = "none",
+          panel.spacing = unit(1, "cm")) +
+    stat_pvalue_manual(stat.test, label = "p.adj.signif", hide.ns = TRUE, tip.length = 0)
+```
+
+```{r echo=FALSE}
+datatable(stat.test)
+```
+
+```{r, fig.width = 6, fig.height = 4, fig.align = 'center'}
+model <- lmer(
+    shannon_diversity ~ LESION_INFL + (1|PID),
+    data = data_summary)
+
+sim <- simulateResiduals(model)
+testUniformity(sim, plot = FALSE)
+testDispersion(sim, plot = FALSE)
+testZeroInflation(sim, plot = FALSE)
+
+estimated_marginal_means <- emmeans(model, ~ LESION_INFL)
+
+pw_comparisons <- pairs(estimated_marginal_means, adjust = "BH")
+
+pw_cmp_df <- as.data.frame(summary(pw_comparisons))
+pw_cmp_df$contrast <- gsub("[()]", "", pw_cmp_df$contrast)
+
+stat.test <- pw_cmp_df %>%
+    mutate(
+        group1 = sub(" - .*", "", contrast),
+        group2 = sub(".* - ", "", contrast),
+        y.position = max(data_summary$shannon_diversity, na.rm = TRUE) + seq(0.0, 1.0, by = 0.2)) %>%
+    add_significance(p.col = "p.value", output.col = "p.adj.signif")
+
+ggplot(data_summary, aes(x = LESION_INFL, y = shannon_diversity)) +
+    geom_boxplot(aes(color = LESION_INFL, fill = LESION_INFL), width = 0.5, alpha = 0.4, outlier.shape = NA) +
+    geom_jitter(aes(color = LESION_INFL), width = 0.2, height = 0, size = 1.5, alpha = 0.5) +
+    scale_fill_manual(values = MyColorsLesionsInfl) +
+    scale_color_manual(values = MyColorsLesionsInfl) +
+    scale_x_discrete(labels = x_labels) +
+    labs(x = "", y = expression(atop("Shannon Diversity Index",
+                                     "of" ~ italic("Orthototiviridae") ~ "Species"))) +
+    theme_minimal() +
+    theme(element_text(size = 10),
+          panel.grid.major.x = element_blank(),
+          panel.grid.major.y = element_line(linewidth = 1.2),
+          axis.title.y = element_text(vjust = 2, margin = margin(r = 15)),
+          legend.position = "none",
+          panel.spacing = unit(1, "cm")) +
+    stat_pvalue_manual(stat.test, label = "p.adj.signif", hide.ns = TRUE, tip.length = 0)
+```
+
+```{r echo=FALSE}
+datatable(stat.test)
+```
+
+### Figure 4c
+```{r, fig.width = 6, fig.height = 4, fig.align = 'center'}
+samples_with_reads <- Mastertable_viral %>%
+    filter(Final_Family == "Orthototiviridae") %>%
+    select(all_of(samples)) %>%
+    summarise(across(everything(), sum, na.rm = TRUE)) %>%
+    select_if(~ . > 0) %>%
+    colnames()
+
+abundances_TPM_pos_only <- Mastertable_viral %>%
+    filter(Final_Family == "Orthototiviridae") %>%
+    select(c("CONTIGS", "length"), all_of(samples_with_reads), all_of(grep("^Final", colnames(Mastertable_viral)))) %>%
+    pivot_longer(cols = samples_with_reads, names_to = "SAMPLE_ID", values_to = "mapped_reads") 
+
+abundances_TPM_pos_only$RPK <- abundances_TPM_pos_only$mapped_reads/abundances_TPM_pos_only$length
+
+virome_profiles <- abundances_TPM_pos_only %>%
+    group_by(SAMPLE_ID, Final_Species) %>%
+    summarize(RPK = sum(RPK), .groups = 'drop')
+
+virome_profiles <- virome_profiles %>%
+    group_by(SAMPLE_ID) %>%
+    mutate(RPK_total = sum(RPK),
+           TPM = (RPK / RPK_total) * 10^6)
+
+virome_profiles <- merge(virome_profiles, metadata, by = "SAMPLE_ID", all = FALSE)
+
+virome_profiles <- virome_profiles %>%
+    group_by(PID, Final_Species) %>%
+    summarize(mean_TPM_patient = mean(TPM)) %>%
+    pivot_wider(names_from = Final_Species, values_from = mean_TPM_patient, values_fill = list(mean_TPM_patient = 0)) %>%
+    column_to_rownames(var = "PID")
+
+virome_profiles_hell <- decostand(virome_profiles, "hellinger")
+bray_dist <- vegdist(virome_profiles_hell, method = "bray")
+
+pcoa_results <- cmdscale(bray_dist, k = 2, eig = TRUE, add = TRUE) 
+pcoa_positions <- pcoa_results$points
+colnames(pcoa_positions) <- c("PCoA1", "PCoA2")
+
+pcoa_positions <- pcoa_positions %>%
+    as_tibble(rownames = "PID")
+
+percent_explained <- 100 * pcoa_results$eig / sum(pcoa_results$eig)
+percent_explained[1:2]
+
+data_plot <- merge(pcoa_positions, metadata %>% select(-SAMPLE_ID, -LESION_INFL) %>% unique(), 
+                   by = "PID", all = FALSE)
+
+data_plot <- data_plot %>%
+    mutate(CONDITION = factor(CONDITION, levels = c("Healthy", "Acne")))
+
+label_axis <- c(paste0("PCo1 (", sprintf("%.1f", percent_explained[1]), "%)"), 
+                paste0("PCo2 (", sprintf("%.1f", percent_explained[2]), "%)"))
+
+centroids <- data_plot %>%
+    group_by(CONDITION) %>%
+    summarise(PCoA1 = mean(PCoA1, na.rm = TRUE), PCoA2 = mean(PCoA2, na.rm = TRUE), .groups = "drop")
+
+ggplot(data_plot, aes(x=PCoA1, y=PCoA2, color = CONDITION)) + 
+    geom_point(size = 3, alpha = 0.7) +
+    geom_point(data = centroids, aes(x = PCoA1, y = PCoA2, color = CONDITION),
+               size = 4, shape = 4, stroke = 1, show.legend = FALSE) +
+    scale_color_manual(values = MyColorsCondition) +
+    stat_ellipse(aes(x = PCoA1, y = PCoA2, color = CONDITION), linetype = "dashed", 
+                 level = 0.95, show.legend = FALSE, type = "norm", inherit.aes = FALSE) +
+    labs(x = label_axis[1], y=label_axis[2], color = NULL, shape = NULL) + 
+    theme_minimal()
+
+set.seed(123)
+permanova_results <- adonis2(bray_dist ~ CONDITION, data = data_plot, permutations = 999, by = "margin")
+print(permanova_results)
+```
+
+PERMANOVA statistics on CONDITION (acne vs. healthy)
+```{r}
+print(permanova_results)
+```
+
+PERMDISP2 statistics on CONDITION
+```{r}
+betadisper_CONDITION <- betadisper(bray_dist, data_plot$CONDITION)
+set.seed(123)
+permutest(betadisper_CONDITION, permutations = 999)
+```
+
+### Figure 4d
+```{r, fig.width = 5, fig.height = 4, fig.align = 'center'}
+clinical_covariate <- metadata %>%
+    filter(PID %in% data_plot$PID) %>%
+    select(PID, CONDITION, GENDER, INC_AGE, INC_BMI, INC_SMOKER, INC_PHOTOTYPE) %>%
+    mutate(CONDITION = factor(CONDITION), INC_AGE = factor(INC_AGE), INC_SMOKER = factor(INC_SMOKER), INC_PHOTOTYPE = factor(INC_PHOTOTYPE)) %>%
+    unique() %>%
+    {
+        na_percent <- sapply(., function(x) mean(is.na(x))) * 100
+        cols_to_remove <- names(na_percent[na_percent > 10])
+        . <- .[, !names(.) %in% cols_to_remove]
+        
+        unique_counts <- sapply(., function(x) length(unique(na.omit(x))))
+        cols_single_unique <- names(unique_counts[unique_counts == 1])
+        . <- .[, !names(.) %in% cols_single_unique]
+        .
+    } %>%
+    na.omit() %>%
+    arrange(match(PID, rownames(virome_profiles))) %>%
+    column_to_rownames(var = "PID") %>%
+    rename("Clinical status" = CONDITION, 
+           "Gender" = GENDER,
+           "Age" = INC_AGE,
+           "Body Mass Index (BMI)" = INC_BMI,
+           "Smoking status" = INC_SMOKER,
+           "Skin phototype" = INC_PHOTOTYPE)
+
+#Functions are copied from https://github.com/raeslab/RLdbRDA/tree/main
+get_r2_single <- function(distmat, meta, feature) {
+    capsc <- capscale(distmat ~ meta[, feature])
+    an <- anova.cca(capsc)
+    
+    Fa <- an["F"][[1]][[1]]
+    r2 <- RsquareAdj(capsc)[[1]]
+    r2adj <- RsquareAdj(capsc)[[2]]
+    N <- nrow(na.exclude(meta[,feature,drop=FALSE]))
+    pval <- an["Pr(>F)"][[1]][[1]]
+    
+    output <- cbind(feature, Fa, r2, r2adj, N, pval)
+    
+    return(output)
+}
+
+get_r2 <- function(distmat, meta) {
+    features = colnames(meta)
+    
+    all <- c()
+    
+    for (feature in features){
+        es <- get_r2_single(distmat, meta, feature)
+        all <- rbind(all, es)
+    }
+    
+    all <- data.frame(all)
+    all$padj <- p.adjust(all$pval, method="holm")
+    
+    rownames(all) <- all$feature
+    
+    return(all)
+}
+
+get_cumul <- function(distmat, meta) {
+    mod0=capscale(distmat ~ 1) #H0: unconstrained ordination
+    mod1=capscale(distmat ~ ., data=meta) #H1: full constrained ordination, all metadata
+    
+    
+    attach(meta)
+    
+    set.seed(123)
+    step.res<-ordiR2step(mod0, scope=formula(mod1), data=meta, direction="forward", Pin = 1, R2scope = TRUE, pstep = 100, perm.max = 999, permutations=9999, trace = F) #forward stepwise dbRDA
+    res=step.res$anova
+    
+    
+    row.names(res)=gsub(pattern="\\+ ", "",row.names(res))
+    rownames(res) <- gsub(pattern = "`", "", rownames(res))
+    colnames(res)=gsub(pattern="Pr\\(>F\\)", "pval", colnames(res)) # replace column name
+    colnames(res)=paste0("RDAcumul_",colnames(res))
+    res[,"RDAcumul_N"]=nrow(meta)
+    
+    detach(meta)
+    
+    
+    return(res)
+}
+
+combine_data <- function(r2, cumul){
+    
+    all=data.frame(merge(r2,cumul,by="row.names",all=T),row.names=1)
+    all=all[order(all$r2,decreasing=TRUE),]
+    all=all[order(all$RDAcumul_R2.adj),]
+    
+    return(all)
+}
+
+prepare_plot_data <- function(dbrda_data) {
+    # Define the order of the y-axis
+    plot_order = rev(row.names(dbrda_data))
+    
+    # Impute missing values in RDAcumul_R2.adj with the largest non-NA value
+    insignificant_features <- row.names(dbrda_data)[is.na(dbrda_data$RDAcumul_R2.adj)]
+    max_val <- max(dbrda_data$RDAcumul_R2.adj, na.rm = TRUE)
+    dbrda_data$RDAcumul_R2.adj[is.na(dbrda_data$RDAcumul_R2.adj)] <- max_val
+    
+    # Filter the data and reshape it to long form
+    plot_data = dbrda_data %>%
+        filter(row.names(dbrda_data) != "<All variables>") %>%
+        select(r2adj, RDAcumul_R2.adj) %>%
+        mutate(r2adj = as.numeric(r2adj)) %>%
+        rownames_to_column(var = "rowname") %>%
+        pivot_longer(-rowname, names_to = "variable", values_to = "value") %>%
+        mutate(significant = ifelse(rowname %in% insignificant_features, 0, 1))
+    
+    plot_data$rowname <- factor(plot_data$rowname, levels = plot_order)
+    
+    return(plot_data)
+}
+
+bray_mat <- as.matrix(bray_dist)
+bray_mat_clean <- bray_mat[rownames(clinical_covariate), rownames(clinical_covariate)]
+bray_dist_clean <- as.dist(bray_mat_clean)
+
+r2 <- get_r2(bray_dist_clean, clinical_covariate)
+
+sign_r2 <- rownames(r2[which(r2$padj < 0.05),])
+
+cumul <- get_cumul(bray_dist_clean, clinical_covariate[, sign_r2, drop=F])
+
+out <- combine_data(r2, cumul)
+
+plot_data <- prepare_plot_data(out)
+
+ggplot(data = plot_data, aes(x = value, y = rowname, fill = variable)) +
+    geom_bar(aes(alpha = significant), stat = 'identity', position = position_dodge2()) +
+    theme_minimal() +
+    theme(legend.position = "bottom") +
+    xlab('Effect size') +
+    ylab(NULL) +
+    labs(fill = "") + 
+    guides(alpha="none") + 
+    scale_fill_manual(values=c("#D8B70A", "#02401B"),
+                      labels=c(bquote(R^2), bquote('Cumulative' ~ R^2))) +
+    scale_x_continuous(
+        breaks = c(0, 0.1, 0.2, 0.3),
+        labels = c("0", "0.1", "0.2", "0.3")) +
+    scale_alpha_continuous(range = c(0.5, 1), limits = c(0, 1))
+```
+
+```{r echo=FALSE}
+datatable(out)
+```
+
+## Figure 5
+```{r, fig.width = 15, fig.height = 6, fig.align = 'center'}
+abundances_TPM <- esviritu_output_filtered_clean %>%
+    group_by(sample_ID, Length, plot_taxa) %>%
+    summarize(tot_read_count = sum(read_count),
+              .groups = 'drop') %>%
+    mutate(RPK = tot_read_count / Length)
+
+abundances_TPM <- abundances_TPM %>%
+    group_by(sample_ID) %>%
+    mutate(RPK_total = sum(RPK),
+           TPM = (RPK / RPK_total) * 10^6)
+
+data_plot <- merge(abundances_TPM, metadata, by.x = "sample_ID", by.y = "SAMPLE_ID")
+
+data_plot$CONDITION <- factor(data_plot$CONDITION, levels = c("Healthy", "Acne"))
+
+data_plot$sample_ID <- factor(data_plot$sample_ID, levels = unique(data_plot$sample_ID))
+data_plot$LESION_INFL <- factor(data_plot$LESION_INFL, levels = c("Healthy", "No_lesions", "Non-inflammatory_lesions", "Inflammatory_lesions"),
+                                labels = c("Healthy Control Group", "No lesions", "Non-inflammatory lesions", "Inflammatory lesions"))
+
+data_plot <- data_plot %>%
+    mutate(plot_taxa = factor(plot_taxa, 
+                              levels = c(setdiff(sort(unique(plot_taxa)), c("Unclassified phages", "Eukaryotic viruses\n(Betapapillomaviruses)","Eukaryotic viruses\n(Gammapapillomaviruses)", "Eukaryotic viruses\n(Mupapillomaviruses)", "Eukaryotic viruses\n(Unclassified papillomaviruses)","Eukaryotic viruses\n(others)")), 
+                                         "Unclassified phages", "Eukaryotic viruses\n(Betapapillomaviruses)","Eukaryotic viruses\n(Gammapapillomaviruses)", "Eukaryotic viruses\n(Mupapillomaviruses)", "Eukaryotic viruses\n(Unclassified papillomaviruses)","Eukaryotic viruses\n(others)")))
+           
+names(MyColorsEsviritu) <- levels(data_plot$plot_taxa)
+
+ggplot(data_plot, aes(x = TPM, y = PID, fill = plot_taxa)) +
+    geom_bar(stat = "identity") + 
+    scale_y_discrete(limits = rev) +
+    labs(x = "Relative Abundance of Detected Viral Taxa in Transcripts Per Kilobase Million (TPM)", 
+         y = "", fill = "Detected Taxa")  +
+    scale_fill_manual(values=MyColorsEsviritu, guide = guide_legend(ncol = 5)) +
+    theme_minimal() +
+    theme(text = element_text(size = 10),
+          axis.title.x = element_text(margin = margin(t = 10)),
+          strip.text = element_text(size = 12),
+          legend.direction = "vertical",
+          panel.grid.minor = element_blank(),
+          panel.spacing = unit(0.5, "cm"),
+          legend.position = "bottom") +
+    scale_x_continuous(labels = comma) +
+    facet_wrap(~LESION_INFL, nrow = 1, scales = "free")
+```
+
+# Supplementary Material
+
+## Figure S1
+```{r, fig.width = 15, fig.height = 6, fig.align = 'center'}
+
+samples_with_reads <- Mastertable_viral_indiv %>%
+    select(all_of(samples_indiv)) %>%
+    summarise(across(everything(), sum, na.rm = TRUE)) %>%
+    select_if(~ . > 0) %>%
+    colnames()
+
+abundances_TPM_pos_only <- Mastertable_viral_indiv %>%
+    select(all_of(c("CONTIGS", "length", samples_with_reads)), all_of(grep("^Final", colnames(Mastertable_viral_indiv)))) %>%
+    pivot_longer(cols = samples_with_reads, names_to = "SAMPLE_ID", values_to = "mapped_reads") 
+
+abundances_TPM_pos_only$RPK <- abundances_TPM_pos_only$mapped_reads/abundances_TPM_pos_only$length
+
+data_plot <- abundances_TPM_pos_only %>%
+    group_by(SAMPLE_ID, Final_Family) %>%
+    summarize(RPK = sum(RPK), .groups = "drop_last")
+
+data_plot <- data_plot %>%
+    group_by(SAMPLE_ID) %>%
+    mutate(RPK_total = sum(RPK),
+           TPM = (RPK / RPK_total) * 10^6)
+
+data_plot <- merge(data_plot, metadata_indiv_samples, by = "SAMPLE_ID", all = FALSE)
+
+data_summary <- data_plot %>%
+    group_by(PID, CONDITION, SAMPLE_TYPE, LESION_INFL, Final_Family) %>%
+    summarize(mean_TPM_patient = mean(TPM), 
+              n_per_PID = n(), .groups = "drop")
+
+data_summary <- data_summary %>%
+    mutate(LESION_INFL = factor(LESION_INFL, levels = c("Healthy", "No_lesions", "Non-inflammatory_lesions", "Inflammatory_lesions"),
+                                labels = c("Healthy Control Group", "No lesions", "Non-inflammatory lesions", "Inflammatory lesions")))
+
+data_summary <- data_summary %>%
+    mutate(Final_Family = factor(Final_Family, levels = rev(names(MyColorsViralFamilies))))
+
+ggplot(data_summary, aes(x = mean_TPM_patient, y = PID, fill = Final_Family)) +
+    geom_bar(stat = "identity") + 
+    labs(x = "Relative Abundance of Viral Families in Transcripts Per Kilobase Million (TPM)", y = "", fill = "Viral Family")  +
+    scale_fill_manual(values=MyColorsViralFamilies, guide = guide_legend(ncol = 1)) +
+    theme_minimal() +
+    theme(text = element_text(size = 10),
+          axis.title.x = element_text(margin = margin(t = 10)),
+          legend.direction = "vertical",
+          panel.grid.minor = element_blank(),
+          panel.spacing = unit(0.5, "cm"),
+          strip.placement = "outside",
+          strip.background = element_blank(),
+          strip.text.y.left = element_text(angle = 90)) +
+    guides(fill=guide_legend(reverse = TRUE, nrow = 15)) +
+    scale_y_discrete(limits = rev) +
+    scale_x_continuous(labels = comma) +
+    facet_nested(rows = vars(SAMPLE_TYPE), cols = vars(LESION_INFL), scales = "free",
+        independent = "y", switch = "y", axes = "all")
+```
+
+## Figure S2
+```{r, fig.width = 10, fig.height = 6, fig.align = 'center'}
+samples_with_reads <- Mastertable_viral %>%
+    filter(Final_Family == "Orthototiviridae") %>%
+    select(all_of(samples)) %>%
+    summarise(across(everything(), sum, na.rm = TRUE)) %>%
+    select_if(~ . > 0) %>%
+    colnames()
+
+abundances_TPM_pos_only <- Mastertable_viral %>%
+    select(c("CONTIGS", "length"), all_of(samples_with_reads), all_of(grep("^Final", colnames(Mastertable_viral)))) %>%
+    pivot_longer(cols = samples_with_reads, names_to = "SAMPLE_ID", values_to = "mapped_reads") 
+
+abundances_TPM_pos_only$RPK <- abundances_TPM_pos_only$mapped_reads/abundances_TPM_pos_only$length
+
+data_plot <- abundances_TPM_pos_only %>%
+    filter(Final_Family == "Orthototiviridae") %>%
+    group_by(SAMPLE_ID, Final_Species) %>%
+    summarize(RPK = sum(RPK), .groups = 'drop')
+
+data_plot <- data_plot %>%
+    group_by(SAMPLE_ID) %>%
+    mutate(RPK_total = sum(RPK),
+           TPM = (RPK / RPK_total) * 10^6)
+
+data_plot <- merge(data_plot, metadata, by = "SAMPLE_ID", all = FALSE)
+
+data_plot <- data_plot %>%
+    group_by(PID, CONDITION, Final_Species) %>%
+    summarize(mean_TPM_patient = mean(TPM),
+              n_per_PID = n(), .groups = "drop")
+    
+data_plot <- data_plot %>%
+    mutate(CONDITION = factor(CONDITION, levels = c("Healthy", "Acne"),
+                                labels = c("Healthy", "Acne")))
+counts <- data_plot %>% 
+    group_by(CONDITION) %>% 
+    summarise(N = n_distinct(PID))
+
+x_labels <- setNames(paste0(levels(data_plot$CONDITION), "\nN = ", counts$N), levels(data_plot$CONDITION))
+
+stat.test <- data_plot %>% 
+    group_by(Final_Species) %>%
+    wilcox_test(mean_TPM_patient ~ CONDITION, paired = FALSE) %>%
+    add_significance() %>%
+    add_y_position()
+
+ggplot(data_plot, (aes(x=CONDITION, y = mean_TPM_patient))) +
+    geom_boxplot(aes(color = Final_Species, fill = Final_Species), width = 0.5, alpha = 0.4, outlier.shape = NA) +
+    geom_jitter(aes(color = Final_Species), width = 0.2, height = 0, size = 2, alpha = 0.3) +
+    scale_fill_manual(values = MyColorsOrthototi) +
+    scale_color_manual(values = MyColorsOrthototi) +
+    labs(x = "", y = "Relative Abundance of Orthototiviruses (TPM)") +
+    theme_minimal() +
+    theme(text = element_text(size = 10),
+          panel.grid.major.x = element_blank(),
+          panel.grid.minor.y = element_blank(),
+          legend.position = "none",
+          strip.text = element_text(margin = margin(b = 20, t = 20))) +
+    scale_x_discrete(labels = x_labels) +
+    scale_y_continuous(labels = comma) +
+    facet_wrap(~Final_Species, scales = "free_x", strip.position = "top", nrow=2) +
+    stat_pvalue_manual(stat.test, label = "p.signif", hide.ns = TRUE, tip.length = 0) +
+    coord_cartesian(ylim = c(0, 1000000), clip = "off")
+```
+
+```{r echo=FALSE}
+datatable(stat.test)
+```
+
+## Figure S3
+```{r, fig.width = 10, fig.height = 13, fig.align = 'center'}
+esviritu_output_filtered <- esviritu_output %>%
+    filter(Length >= 10000 & perc_covered > 5 | Length < 10000 & covered_bases >= 500)
+
+abundances_TPM <- esviritu_output_filtered %>%
+    group_by(sample_ID, Length, species) %>%
+    summarize(tot_read_count = sum(read_count),
+              .groups = 'drop') %>%
+    mutate(RPK = tot_read_count / Length)
+
+abundances_TPM <- abundances_TPM %>%
+    group_by(sample_ID) %>%
+    mutate(RPK_total = sum(RPK),
+           TPM = (RPK / RPK_total) * 10^6)
+
+data_plot <- merge(abundances_TPM, metadata, by.x = "sample_ID", by.y = "SAMPLE_ID")
+
+data_plot <- data_plot %>%
+    mutate(LESION_INFL = ifelse(CONDITION == "Control", "Control", LESION_INFL))
+
+data_plot <- data_plot %>%
+    mutate(
+        # Order controls
+        Control_order = case_when(
+            grepl("^NC", sample_ID)  ~ 1,
+            grepl("^iNC", sample_ID) ~ 2,
+            grepl("^aNC", sample_ID) ~ 3,
+            grepl("^iPC", sample_ID) ~ 4,
+            TRUE ~ 5
+        ),
+        
+        # Order lesion categories
+        Lesion_order = case_when(
+            LESION_INFL == "Healthy" ~ 1,
+            LESION_INFL == "No_lesions" ~ 2,
+            LESION_INFL == "Non-inflammatory_lesions" ~ 3,
+            LESION_INFL == "Inflammatory_lesions" ~ 4,
+            LESION_INFL == "Control" ~ 5,
+            TRUE ~ 6
+        ),
+        
+        # Create x-axis labels
+        PID_label = case_when(
+            LESION_INFL == "Healthy" ~ as.character(PID),
+            LESION_INFL == "No_lesions" ~ paste0(PID, "_NL"),
+            LESION_INFL == "Non-inflammatory_lesions" ~ paste0(PID, "_NIL"),
+            LESION_INFL == "Inflammatory_lesions" ~ paste0(PID, "_IL"),
+            sample_ID == "NC" ~ "Collection NC",
+            sample_ID == "iNC" ~ "Extraction NC",
+            sample_ID == "aNC" ~ "Amplification NC",
+            sample_ID == "iPC" ~ "Extraction PC",
+            TRUE ~ as.character(PID)
+        )
+    ) %>%
+    arrange(Lesion_order, Control_order, sample_ID)
+
+data_plot$sample_ID <- factor(data_plot$sample_ID, levels = unique(data_plot$sample_ID))
+
+heatmapCols <- colorRampPalette(brewer.pal(9, "GnBu"))(20)
+
+ggplot(data_plot, aes(x = sample_ID, y = factor(species, levels = rev(levels(factor(species)))), fill = TPM)) +
+    geom_tile() +
+    scale_x_discrete(labels = setNames(data_plot$PID_label, data_plot$sample_ID)) +
+    scale_fill_gradientn(colors = heatmapCols, na.value="#F7FBFF", trans = 'log10') +
+    labs(x = "Subject/Patient ID (by lesion type)", y = "Viral Species", fill = "Transcripts Per Kilobase Million (TPM)") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 60, vjust = 1, hjust = 1),
+          axis.title.x = element_text(margin = margin(t = 20)),
+          legend.position = "bottom", 
+          legend.justification = "left",
+          legend.key.width = unit(1, "cm"),
+          text = element_text(size=10))
+```
+
+## Figure S4
+```{r, fig.width = 10, fig.height = 9, fig.align = 'center'}
+abundances_TPM <- esviritu_output_filtered_clean %>%
+    group_by(sample_ID, Length, species) %>%
+    summarize(tot_read_count = sum(read_count),
+              .groups = 'drop') %>%
+    mutate(RPK = tot_read_count / Length)
+
+abundances_TPM <- abundances_TPM %>%
+    group_by(sample_ID) %>%
+    mutate(RPK_total = sum(RPK),
+           TPM = (RPK / RPK_total) * 10^6)
+
+data_plot <- merge(abundances_TPM, metadata, by.x = "sample_ID", by.y = "SAMPLE_ID")
+
+data_plot <- data_plot %>%
+    mutate(LESION_INFL = ifelse(CONDITION == "Control", "Control", LESION_INFL))
+
+data_plot <- data_plot %>%
+    mutate(
+        # Order controls
+        Control_order = case_when(
+            grepl("^NC", sample_ID)  ~ 1,
+            grepl("^iNC", sample_ID) ~ 2,
+            grepl("^aNC", sample_ID) ~ 3,
+            grepl("^iPC", sample_ID) ~ 4,
+            TRUE ~ 5
+        ),
+        
+        # Order lesion categories
+        Lesion_order = case_when(
+            LESION_INFL == "Healthy" ~ 1,
+            LESION_INFL == "No_lesions" ~ 2,
+            LESION_INFL == "Non-inflammatory_lesions" ~ 3,
+            LESION_INFL == "Inflammatory_lesions" ~ 4,
+            LESION_INFL == "Control" ~ 5,
+            TRUE ~ 6
+        ),
+        
+        # Create x-axis labels
+        PID_label = case_when(
+            LESION_INFL == "Healthy" ~ as.character(PID),
+            LESION_INFL == "No_lesions" ~ paste0(PID, "_NL"),
+            LESION_INFL == "Non-inflammatory_lesions" ~ paste0(PID, "_NIL"),
+            LESION_INFL == "Inflammatory_lesions" ~ paste0(PID, "_IL"),
+            LESION_INFL == "Control" ~ as.character(sample_ID),
+            TRUE ~ as.character(PID)
+        )
+    ) %>%
+    arrange(Lesion_order, Control_order, sample_ID)
+
+data_plot$sample_ID <- factor(data_plot$sample_ID, levels = unique(data_plot$sample_ID))
+
+heatmapCols <- colorRampPalette(brewer.pal(9, "GnBu"))(20)
+
+ggplot(data_plot, aes(x = sample_ID, y = factor(species, levels = rev(levels(factor(species)))), fill = TPM)) +
+    geom_tile() +
+    scale_x_discrete(labels = setNames(data_plot$PID_label, data_plot$sample_ID)) +
+    scale_fill_gradientn(colors = heatmapCols, na.value="#F7FBFF", trans = 'log10') +
+    labs(x = "Subject/Patient ID (by lesion type)", y = "Viral Species", fill = "Transcripts Per Kilobase Million (TPM)") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 60, vjust = 1, hjust = 1),
+          axis.title.x = element_text(margin = margin(t = 20)),
+          legend.position = "bottom", 
+          legend.justification = "left",
+          legend.key.width = unit(1, "cm"),
+          text = element_text(size=10))
+```
+
+## Figure S5
+```{r, fig.width = 5, fig.height = 4, fig.align = 'center'}
+
+data_plot <- esviritu_output_filtered_clean %>%
+    select(sample_ID, perc_covered)
+
+data_summary <- merge(data_plot, metadata, by.x = "sample_ID", by.y = "SAMPLE_ID")
+
+data_summary <- data_summary %>%
+    mutate(LESION_INFL = factor(LESION_INFL, levels = c("Healthy", "No_lesions", "Non-inflammatory_lesions", "Inflammatory_lesions"),
+                                labels = c("Healthy\nControl Group", "No lesions", "Non-inflammatory\nlesions", "Inflammatory\nlesions")))
+
+counts <- data_summary %>%
+    group_by(LESION_INFL) %>%
+    summarise(N = n())
+
+x_labels <- setNames(paste0(levels(data_summary$LESION_INFL), "\nN = ", counts$N), levels(data_summary$LESION_INFL))
+
+model <- lmer(
+    perc_covered ~ LESION_INFL + (1|PID),
+    data = data_summary)
+
+sim <- simulateResiduals(model)
+testUniformity(sim, plot = FALSE)
+testDispersion(sim, plot = FALSE)
+testZeroInflation(sim, plot = FALSE)
+
+estimated_marginal_means <- emmeans(model, ~ LESION_INFL)
+
+pw_comparisons <- pairs(estimated_marginal_means, adjust = "BH")
+
+pw_cmp_df <- as.data.frame(summary(pw_comparisons))
+pw_cmp_df$contrast <- gsub("[()]", "", pw_cmp_df$contrast)
+
+stat.test <- pw_cmp_df %>%
+    mutate(
+        group1 = sub(" - .*", "", contrast),
+        group2 = sub(".* - ", "", contrast),
+        y.position = max(data_summary$perc_covered, na.rm = TRUE) + seq(0.5, 3, by = 0.5)) %>%
+    add_significance(p.col = "p.value", output.col = "p.adj.signif")
+
+ggplot(data_summary, aes(x = LESION_INFL, y = perc_covered)) +
+    geom_boxplot(aes(color = LESION_INFL, fill = LESION_INFL), width = 0.5, alpha = 0.4, outlier.shape = NA) +
+    geom_jitter(aes(color = LESION_INFL), width = 0.2, height = 0, size = 1.5, alpha = 0.5) +
+    scale_fill_manual(values = MyColorsLesionsInfl) +
+    scale_color_manual(values = MyColorsLesionsInfl) +
+    scale_x_discrete(labels = x_labels) +
+    ylim(0, max(data_summary$perc_covered)) +
+    labs(x = "", y = "% coverage of reference genomes") +
+    theme_minimal() +
+    theme(element_text(size = 10),
+          panel.grid.major.x = element_blank(),
+          panel.grid.major.y = element_line(linewidth = 1.2),
+          axis.title.y = element_text(vjust = 2, margin = margin(r = 15)),
+          legend.position = "none",
+          panel.spacing = unit(1, "cm")) +
+    stat_pvalue_manual(stat.test, label = "p.adj.signif", hide.ns = TRUE, tip.length = 0)
+```
+
+```{r echo=FALSE}
+datatable(stat.test)
+```
+
+## Figure S6
+```{r, fig.width = 8, fig.height = 10, fig.align = 'center'}
+abundances_TPM <- esviritu_output_filtered_clean %>%
+    group_by(sample_ID, Length, Accession, plot_taxa) %>%
+    summarize(tot_read_count = sum(read_count),
+              .groups = 'drop')
+
+abundances_TPM <- abundances_TPM %>%
+    complete(sample_ID, nesting(plot_taxa, Length, Accession),
+             fill = list(tot_read_count = 0)) %>%
+    arrange(sample_ID, plot_taxa, Length) %>%
+    mutate(RPK = tot_read_count / Length)
+
+abundances_TPM <- abundances_TPM %>%
+    group_by(sample_ID, plot_taxa) %>%
+    summarize(RPK = sum(RPK), .groups = 'drop')
+
+abundances_TPM <- abundances_TPM %>%
+    group_by(sample_ID) %>%
+    mutate(RPK_total = sum(RPK),
+           TPM = (RPK / RPK_total) * 10^6)
+
+data_plot <- merge(abundances_TPM, metadata, by.x = "sample_ID", by.y = "SAMPLE_ID")
+
+data_plot <- data_plot %>%
+    group_by(PID, CONDITION, plot_taxa) %>%
+    summarize(mean_TPM_patient = mean(TPM),
+              n_per_PID = n(), .groups = "drop")
+
+data_plot <- data_plot %>%
+    mutate(CONDITION = factor(CONDITION, levels = c("Healthy", "Acne"),
+                              labels = c("Healthy", "Acne")))
+
+data_plot <- data_plot %>%
+    mutate(plot_taxa = factor(plot_taxa, 
+                              levels = c(setdiff(sort(unique(plot_taxa)), c("Unclassified phages", "Eukaryotic viruses\n(Betapapillomaviruses)","Eukaryotic viruses\n(Gammapapillomaviruses)", "Eukaryotic viruses\n(Mupapillomaviruses)", "Eukaryotic viruses\n(Unclassified papillomaviruses)","Eukaryotic viruses\n(others)")), 
+                                         "Unclassified phages", "Eukaryotic viruses\n(Betapapillomaviruses)","Eukaryotic viruses\n(Gammapapillomaviruses)", "Eukaryotic viruses\n(Mupapillomaviruses)", "Eukaryotic viruses\n(Unclassified papillomaviruses)","Eukaryotic viruses\n(others)")))
+
+counts <- data_plot %>% 
+    group_by(CONDITION) %>% 
+    summarise(N = n_distinct(PID))
+
+x_labels <- setNames(paste0(levels(data_plot$CONDITION), "\nN = ", counts$N), levels(data_plot$CONDITION))
+
+stat.test <- data_plot %>% 
+    group_by(plot_taxa) %>%
+    wilcox_test(mean_TPM_patient ~ CONDITION, paired = FALSE) %>%
+    add_significance() %>%
+    add_y_position()
+
+ggplot(data_plot, (aes(x=CONDITION, y = mean_TPM_patient))) +
+    geom_boxplot(aes(color = plot_taxa, fill = plot_taxa), width = 0.5, alpha = 0.4, outlier.shape = NA) +
+    geom_jitter(aes(color = plot_taxa), width = 0.2, height = 0, size = 2, alpha = 0.3) +
+    scale_fill_manual(values = MyColorsEsviritu) +
+    scale_color_manual(values = MyColorsEsviritu) +
+    labs(x = "", y = "Relative Abundance of Detected Taxa (TPM)") +
+    theme_minimal() +
+    theme(text = element_text(size = 10),
+          panel.grid.major.x = element_blank(),
+          panel.grid.minor.y = element_blank(),
+          legend.position = "none",
+          strip.text = element_text(margin = margin(b = 10, t = 10))) +
+    scale_x_discrete(labels = x_labels) +
+    scale_y_continuous(labels = comma) +
+    facet_wrap(~plot_taxa, scales = "free_x", strip.position = "top", nrow=7) +
+    stat_pvalue_manual(stat.test, label = "p.signif", hide.ns = TRUE, tip.length = 0) +
+    coord_cartesian(ylim = c(0, 1000000), clip = "off")
+```
+
+```{r echo=FALSE}
+datatable(stat.test)
+```
